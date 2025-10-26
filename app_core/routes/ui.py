@@ -1356,8 +1356,16 @@ def _render_field_strength_image(lons_deg, lats_deg, field_levels_dbuv, radius_k
     dist_km = dist * (np.pi / 180.0) * earth_radius_km
     field_plot[dist_km > radius_km] = np.nan
 
+    masked_plot = np.ma.masked_invalid(field_plot)
+    base_cmap = plt.cm.get_cmap('turbo')
+    try:
+        cmap = base_cmap.copy()
+    except AttributeError:
+        cmap = ListedColormap(base_cmap(np.linspace(0, 1, base_cmap.N)))
+    cmap.set_bad(alpha=0.0)
+
     fig, ax = plt.subplots(figsize=(6, 6))
-    mesh = ax.pcolormesh(lon_grid, lat_grid, field_plot, cmap='rainbow', shading='auto',
+    mesh = ax.pcolormesh(lon_grid, lat_grid, masked_plot, cmap=cmap, shading='auto',
                          vmin=min_val, vmax=max_val)
 
     if horizontal_pattern_linear is not None:
@@ -1403,9 +1411,13 @@ def calculate_coverage():
     loss      = current_user.total_loss or 0.0
     Ptx_W     = current_user.transmission_power
     ganho_pico_dBi = current_user.antenna_gain or 0.0
-    Grx_dBi   = current_user.rx_gain
-    long      = current_user.longitude
-    lati      = current_user.latitude
+    Grx_dBi   = current_user.rx_gain or 0.0
+    center_override = data.get('customCenter') or {}
+    try:
+        long = float(center_override.get('lng', current_user.longitude))
+        lati = float(center_override.get('lat', current_user.latitude))
+    except (TypeError, ValueError):
+        long, lati = current_user.longitude, current_user.latitude
 
     raio_para_adj = data.get('radius')
     new_center_lat, new_center_lon = adjust_center(raio_para_adj, lati, long)
@@ -1571,6 +1583,8 @@ def calculate_coverage():
             "min": min_val,
             "max": max_val,
         },
+        "center": {"lat": lat_center_deg, "lng": lon_center_deg},
+        "requested_radius_km": data.get('radius'),
         "gain_components": {
             "base_gain_dbi": ganho_pico_dBi,
             "horizontal_adjustment_db_min": float(np.nanmin(horizontal_gain_grid_db)) if np.ndim(horizontal_gain_grid_db) else 0.0,

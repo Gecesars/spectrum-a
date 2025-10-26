@@ -59,6 +59,16 @@
         </div>
 
         <div class="panel-card">
+            <h3 class="card-title">Visualização</h3>
+            <p class="assist-text">Arraste o marcador vermelho para reposicionar a TX. A região circular acompanha o raio selecionado.</p>
+            <div class="slider-row">
+                <label class="form-label" for="overlayOpacity">Transparência</label>
+                <input type="range" id="overlayOpacity" min="0.1" max="1" step="0.05">
+                <span id="overlayOpacityValue">0.85</span>
+            </div>
+        </div>
+
+        <div class="panel-card">
             <h3 class="card-title">Ajuste de Tilt</h3>
             <label class="form-label" for="tiltControl">Tilt elétrico TX (°)</label>
             <div class="input-group">
@@ -66,6 +76,15 @@
                 <span class="input-value" id="tiltValue">0°</span>
             </div>
             <p class="assist-text">O ganho vertical é recalculado em E/Emax (θ = 0°) para o perfil de cobertura.</p>
+        </div>
+
+        <div class="panel-card">
+            <div class="d-flex justify-content-between align-items-center">
+                <h3 class="card-title mb-0">Recepções</h3>
+                <button class="btn btn-sm btn-outline-secondary" type="button" id="btnClearRx">Limpar</button>
+            </div>
+            <p class="assist-text">Clique no mapa para adicionar pontos RX. Toque em um item para focar ou gerar perfil.</p>
+            <ul class="rx-list" id="rxList"></ul>
         </div>
 
         <div class="panel-card">
