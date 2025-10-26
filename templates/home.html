@@ -1,146 +1,70 @@
-<!DOCTYPE html>
-<html lang="pt-br">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Home - Ideal Antenas</title>
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            font-family: Arial, sans-serif;
-            display: flex;
-            flex-direction: column;
-            min-height: 100vh;
-            background-color: #f4f4f4;
-        }
-        .navbar {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            background-color: #333;
-            color: white;
-            padding: 10px 20px;
-        }
-        .navbar ul {
-            list-style: none;
-            display: flex;
-            margin: 0;
-            padding: 0;
-        }
-        .navbar ul li {
-            padding: 0 15px;
-        }
-        .navbar a {
-            color: white;
-            text-decoration: none;
-            padding: 10px 20px;
-            transition: background 0.3s;
-        }
-        .navbar a:hover {
-            background-color: #444;
-        }
-        .container {
-            flex-grow: 1;
-            text-align: center;
-            padding: 50px 20px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            max-width: 600px; /* Define a largura máxima */
-            margin: 0 auto; /* Centraliza horizontalmente */
-            background-color: white;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-            border-radius: 10px;
-        }
-        h1 {
-            margin-bottom: 20px;
-            color: #333;
-        }
-        textarea {
-            margin: 10px 0;
-            padding: 10px;
-            width: 100%; /* Largura total do contêiner */
-            box-sizing: border-box;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-            resize: none; /* Remove a capacidade de redimensionar */
-        }
-        button {
-            margin: 10px 0;
-            padding: 10px;
-            width: 100%; /* Largura total do contêiner */
-            box-sizing: border-box;
-            background-color: #007bff;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-            color: white;
-            transition: background 0.3s;
-        }
-        button:hover {
-            background-color: #0056b3;
-        }
-        .footer {
-            color: white;
-            text-align: center;
-            padding: 10px 0;
-            background: linear-gradient(270deg, #ff0000, #ff7f00, #ffff00, #00ff00, #0000ff);
-            background-size: 500% 500%;
-            animation: AnimationName 10s ease infinite;
-        }
-        @keyframes AnimationName { 
-            0% { background-position: 0% 50% }
-            50% { background-position: 100% 50% }
-            100% { background-position: 0% 50% }
-        }
-        @media (max-width: 768px) {
-            .container {
-                padding: 20px;
-            }
-            button {
-                margin-top: 5px;
-            }
-        }
-    </style>
-</head>
-<body>
-    <div class="navbar">
-        <ul>
-            <li><a href="#">File1</a></li>
-            <li><a href="#">Help</a></li>
-        </ul>
-    </div>
-    <div class="container">
-        <h1>Sequência de execução</h1>
-        <button onclick="window.location.href='/sensors'">Leitura dos Sensores</button>
-        <button onclick="window.location.href='/calcular-cobertura'">Calcular Cobertura</button>
-        <button onclick="window.location.href='/calculos-rf'">Cálculos RF</button>
-        <textarea placeholder="Digite suas notas aqui..." rows="10"></textarea>
-        <button onclick="salvarNota()">Salvar Nota</button>
-        <button onclick="window.location.href='/gerar-relatorio'">Gerar Relatório</button>
-    </div>
-    <div class="footer">
-        Sistema de Monitoramento e Telemetria
-    </div>
-    <script>
-        function salvarNota() {
-            const notas = document.querySelector('textarea').value;  // Pega o valor do textarea
-            fetch('/update-notes', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                },
-                body: 'notes=' + encodeURIComponent(notas)
-            })
-            .then(response => response.json())
-            .then(data => {
-                alert(data.message);  // Mostra uma mensagem de sucesso ou erro
-            })
-            .catch(error => console.error('Erro ao salvar as notas:', error));
-        }
-    </script>
-</body>
-</html>
+{% extends "layouts/base.html" %}
 
+{% block title %}Painel · ATX Coverage{% endblock %}
+
+{% block extra_head %}
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/pages/home.css') }}">
+{% endblock %}
+
+{% block content %}
+<div class="home-container">
+    <div class="d-flex align-items-center justify-content-between mb-4">
+        <div>
+            <h2 class="page-heading mb-1">Painel de operações</h2>
+            <p class="subheading mb-0">Sequência sugerida para coleta de dados e análise de cobertura</p>
+        </div>
+        <span class="badge-soft text-uppercase">v2 preview</span>
+    </div>
+
+    <section class="home-card">
+        <div class="home-actions">
+            <button class="btn btn-brand" onclick="window.location.href='{{ url_for('ui.sensors') }}'">Leitura dos sensores</button>
+            <button class="btn btn-outline-primary" onclick="window.location.href='{{ url_for('ui.calcular_cobertura') }}'">Calcular cobertura</button>
+            <button class="btn btn-outline-primary" onclick="window.location.href='{{ url_for('ui.calculos_rf') }}'">Cálculos RF</button>
+            <button class="btn btn-outline-primary" onclick="window.location.href='{{ url_for('ui.mapa') }}'">Perfil de enlace</button>
+            <button class="btn btn-outline-primary" onclick="window.location.href='{{ url_for('ui.visualizar_dados_salvos') }}'">Dados salvos</button>
+        </div>
+
+        <div class="home-notes mb-3">
+            <label for="notesArea" class="form-label">Notas operacionais</label>
+            <textarea id="notesArea" class="form-control" placeholder="Anote informações importantes sobre a missão, ajustes de antena ou resultados de campo.">{{ current_user.notes if current_user.is_authenticated else '' }}</textarea>
+        </div>
+        <div class="d-grid gap-2 d-sm-flex justify-content-sm-end">
+            <button class="btn btn-brand" onclick="salvarNota()">Salvar nota</button>
+            <button class="btn btn-outline-secondary" onclick="window.location.href='{{ url_for('ui.download_report') }}'">Gerar relatório</button>
+        </div>
+    </section>
+
+    <div class="home-footer-banner mt-4">
+        Sistema integrado de monitoramento e telemetria ATX Coverage
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+function salvarNota() {
+    const notas = document.getElementById('notesArea').value;
+    fetch('{{ url_for('ui.update_notes') }}', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'notes=' + encodeURIComponent(notas)
+    })
+    .then(response => response.json())
+    .then(data => {
+        const toast = document.createElement('div');
+        toast.className = 'toast align-items-center text-bg-success border-0';
+        toast.role = 'alert';
+        toast.innerHTML = `<div class="d-flex">
+            <div class="toast-body">${data.message || 'Notas salvas com sucesso.'}</div>
+            <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+        </div>`;
+        document.body.appendChild(toast);
+        const bsToast = new bootstrap.Toast(toast, { delay: 2500 });
+        bsToast.show();
+        toast.addEventListener('hidden.bs.toast', () => toast.remove());
+    })
+    .catch(() => alert('Erro ao salvar as notas. Tente novamente.'));
+}
+</script>
+{% endblock %}
