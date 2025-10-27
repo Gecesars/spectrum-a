@@ -1,62 +1,75 @@
-# ATX Coverage – Visão Geral da Arquitetura (v2)
+# ATX Coverage – Arquitetura e Fluxos (v2)
 
-## Estrutura do backend
+## Visão Geral
 
-- `app_core/__init__.py` concentra a fábrica da aplicação Flask. Lá são feitas:
-  - leitura de configurações (secret, banco de dados, Google Maps, diretório de assets),
-  - inicialização de extensões (`SQLAlchemy`, `LoginManager`, `Flask-Migrate`, `CORS`),
-  - registro do *blueprint* principal (`app_core.routes.ui.bp`),
-  - injeção de variáveis globais de template (ex.: `current_year`).
-- `app_core/routes/ui.py` contém todo o conjunto de rotas e utilidades utilizadas na aplicação:
-  - rotas públicas (landing, login/registro),
-  - rotas autenticadas (dashboard, antena, cobertura, relatório, dados salvos),
-  - serviços REST que manipulam diagramas, notas, perfis, relatórios, cálculos de cobertura e perfil de terreno,
-  - funções auxiliares para parsing de arquivos `.pat`, cálculos matemáticos (pycraf/astropy) e geração de gráficos.
-- `extensions.py` e `user.py` continuam expondo as instâncias compartilhadas (`db`, `login_manager`, modelo `User`).
-- `app3.py` passa a ser apenas o ponto de entrada: importa `create_app`, aplica pequenas configurações de runtime (`OMP`/`OPENBLAS`) e executa `app.run` quando chamado diretamente. O objetivo é manter compatibilidade com `Procfile`/`gunicorn`.
+A aplicação ATX Coverage foi reorganizada para separar claramente backend, camada visual e assets. O backend Flask roda sob `gunicorn` (gerenciado por systemd) e expõe APIs para cadastro de usuários, controle de padrões de antena, geração de mapas de cobertura em dBµV/m e perfis profissionais. O frontend utiliza um layout comum, CSS/JS modulados por página e integrações diretas com Google Maps.
 
-## Organização de templates e assets
+## Backend
 
-- `templates/layouts/base.html` fornece o *layout shell* padrão (header, navegação, footer, toasts). Todos os templates agora usam `{% extends %}`.
-- CSS global em `static/css/main.css`; estilos específicos em `static/css/pages/<page>.css`.
-- Scripts compartilhados padrão em `static/js/main.js`; lógica de página em `static/js/pages/<page>.js`.
-- Páginas reconstruídas:
-  - `templates/index.html`, `register.html`, `home.html`, `inicio.html` – usam o layout e os novos estilos consistentes.
-  - `templates/calcular_cobertura.html` – interface reorganizada, modais compatíveis com Bootstrap 5, assets externos extraídos.
-  - `templates/antena.html` – sidebar fixa para ajustes, pre-visualização responsiva dos diagramas.
-- Assets pesados (PDFs, imagens técnicas) permanecem em `static/`, mas agora o UI consome apenas imagens otimizadas para preview.
+### Fábrica da aplicação e serviço
+- **`app_core/__init__.py`**: faz `load_dotenv`, lê variáveis críticas (secret key, banco, Google Maps, diretórios), inicializa `SQLAlchemy`, `LoginManager`, `Flask-Migrate` e `CORS`, registra o blueprint `app_core.routes.ui` e injeta `current_year` nos templates.
+- **`app3.py`**: mantém compatibilidade com Procfile/Heroku e define limites de threads BLAS antes de executar a aplicação.
+- **`/etc/systemd/system/atxcover.service`**: executa `gunicorn` a partir do virtualenv `.venv`, lê `.env` via `EnvironmentFile`, usa timeout ampliado (180s) e se reinicia automaticamente se algo falhar.
 
-## Fluxos principais
+### Blueprint `app_core.routes.ui`
+- **Autenticação & shell**: rotas públicas (`inicio`, `index`, `register`) e protegidas (`home`, `logout`) com Flask-Login.
+- **Antena**:
+  - Upload e parsing de arquivos `.pat` por `parse_pat` (E/Emax horizontal/vertical).
+  - Geração/salvamento de diagramas com commit no modelo `User`.
+- **Cobertura (`/calculate-coverage`)**:
+  - Ajusta o centro usando regressões (`adjust_center`) e consulta a topografia SRTM (`pycraf.pathprof.height_map_data`).
+  - Calcula perdas por `atten_map_fast` e separa o ganho da antena em duas componentes: horizontal (E/Emax rotacionado de acordo com a direção) e vertical (E/Emax na linha do horizonte com tilt aplicado).
+  - Converte potência recebida para campo elétrico (`dBµV/m`), aplica autoescala por percentis, mascara fora do raio e retorna imagem base64, colorbar, limites, dicionário de pontos, escala e `gain_components` (base, horizontal, vertical, padrões lineares).
+- **Perfil profissional (`/gerar_img_perfil`)**:
+  - Reutiliza padrões horizontal/vertical e tilt para gerar gráfico emissivo: terreno sombreado, curvatura, 1ª zona de Fresnel, linha direta e anotação (ERP, ΔG, campo RX, perdas ITU). Inclui mini gráfico do padrão horizontal em dB.
+- **Dados do usuário**: rotas para salvar/carregar parâmetros (`/salvar-dados`, `/carregar-dados`), atualizar tilt (`/update-tilt`), obter diagramas (`/carregar_imgs`) e gerar relatórios (`/gerar-relatorio`).
+- **Helpers compartilhados**: conversão de dB⇄campo, autoescala, máscara circular, cálculos de Fresnel, ajustes de centro, etc.
 
-1. **Autenticação**  
-   - Login/registro via `ui.login`/`ui.register`.  
-   - `LoginManager` redireciona automaticamente para `ui.login` quando necessário.
-2. **Dashboard (home)**  
-   - Ações rápidas para sensores, cobertura, cálculos RF e mapas.  
-   - Notas salvas assíncronas via `/update-notes`.
-3. **Antena**  
-   - Upload e pré-visualização dos diagramas `.pat`.  
-   - Ajustes de direção/tilt fazem POST para `/upload_diagrama`; persistência via `/salvar_diagrama`.
-4. **Cobertura**  
-   - Formulário segmentado (posicionamento, propagação, especificações).  
-   - Coordenadas por mapa Google ou entrada manual; salvamento em `/salvar-dados`.  
-   - Botões direcionam para visualização (`/mapa`) e dados históricos (`/visualizar-dados-salvos`).
-5. **Relatórios e perfis**  
-   - Geração de PDF (`/gerar-relatorio`), perfil com curvatura (`/gerar_img_perfil`) e mapas de cobertura (`/calculate-coverage`) permanecem com a mesma lógica científica existente.
+## Frontend
 
-## Próximos passos recomendados
+### Layout e assets
+- `templates/layouts/base.html` define cabeçalho, navegação, toasts e slots para CSS/JS.
+- CSS global em `static/css/main.css` e específicos em `static/css/pages/*.css`.
+- JS modular em `static/js/main.js` e `static/js/pages/*.js` (ES6, estado encapsulado, fallback para compatibilidade onde necessário).
 
-1. **Cobertura / mapa**  
-   - Criar feedback visual ao gerar cobertura (loading + apresentação do mapa diretamente nesta página).
-   - Extrair parâmetros avançados (raio, níveis mínimo/máximo) para o formulário – hoje estão hard-coded.
-2. **Antena**  
-   - Exibir dados numéricos (HPBW, diretividade) ao lado dos gráficos, reaproveitando o JSON salvo no usuário.
-   - Disponibilizar histórico de arquivos `.pat` por usuário.
-3. **Arquitetura**  
-   - Continuar modularização dividindo `app_core/routes/ui.py` em *blueprints* menores (ex.: `auth`, `antenna`, `coverage`, `reports`).
-   - Extrair helpers de cálculo para `app_core/services/` com testes unitários.
-4. **Front-end**  
-   - Centralizar componentes (botões, cards, toasts) em um *design system* leve para evitar duplicidade de estilos no futuro.
-   - Incluir testes e lint para JS/CSS (por exemplo com `eslint`/`stylelint`).
+### Páginas remodeladas
+- **Landing/Login/Registro/Home**: converteram para o novo layout com validação moderna.
+- **Antena** (`templates/antena.html`, `static/js/pages/antenna.js`): sidebar fixa, upload `.pat`, sliders de direção/tilt, preview em tempo real e funções globais expostas (`salvarDiagrama`, `sendDirectionAndFile`, `applyTilt`).
+- **Calcular Cobertura** (`templates/calcular_cobertura.html`, `static/js/pages/cobertura.js`): formulário segmentado, campo de tilt, modais compatíveis com/sem Bootstrap e integração com `/calculate-coverage`.
+- **Mapa Profissional** (`templates/mapa.html`, `static/css/pages/map.css`, `static/js/pages/mapa.js`):
+  - Painel lateral com cartões (dados da TX, sliders, lista de RX, resumo de ganhos, ligação TX↔RX, colorbar).
+  - Mapa Google com marcador TX arrastável, múltiplos pontos RX (lista interativa com foco/remover), polilinha TX↔RX, círculo do raio e overlay de cobertura com transparência ajustável.
+  - Slider de opacidade, feedback visual, modal com perfil profissional.
 
-Este documento deve servir como guia rápido da versão atual e como referência dos próximos incrementos planejados.
+## Fluxos
+
+1. **Cobertura**
+   - Formulário salva parâmetros em `/salvar-dados`.
+   - `/calculate-coverage` recebe raio, limites, centro customizado ⇒ pycraf ⇒ campo elétrico (`dBµV/m`) com máscara circular ⇒ resposta JSON (imagem, colorbar, `gain_components`, escala, centro, raio). O frontend desenha overlay, círculo e atualiza resumos.
+2. **Controle TX/RX**
+   - TX arrastável atualiza painel e sugere recalcular cobertura; posição é salva ao chamar `/calculate-coverage`.
+   - Cada clique adiciona RX à lista; distância, campo estimado (via dicionário retornado) e elevação (Google Elevation) são calculados. A lista permite focar, remover e gerar perfil.
+3. **Perfil profissional**
+   - `/gerar_img_perfil` gera gráfico com terreno sombreado, curvatura, Fresnel, linha direta, anotação e mini padrão horizontal. Resultado exibido no modal e armazenado no banco.
+
+## Alterações Recentes
+- Modularização do backend (`app_core`), uso de factory e serviço systemd ajustado.
+- Conversão de todas as páginas para o layout base com assets organizados.
+- Cobertura calculada em `dBµV/m` respeitando ganhos horizontal e vertical provenientes do arquivo `.pat` (incluindo tilt e direção).
+- Nova experiência `/mapa`: painel profissional, TX arrastável, múltiplos RX, slider de opacidade, círculo de raio e overlay com transparência ajustável.
+- Perfil do enlace redesenhado (terreno sombreado, Fresnel destacado, mini diagrama horizontal em dB e anotação rica).
+
+## Próximos Passos
+1. **Geração da Mancha**
+   - Garantir que o centro passado ao pycraf corresponda exatamente ao ponto TX arrastado.
+   - Ajustar dinamicamente a resolução (`map_resolution`) conforme o raio selecionado, evitando sobre/sub-amostragem.
+   - Reavaliar o mecanismo de aplicação de ganho por pixel para considerar azimute/elevação com interpolação mais precisa usando os diagramas de antena.
+   - Consolidar a máscara circular (aprimorar feathering e correspondência com o círculo exibido).
+2. **Exportação KML/KMZ**
+   - Implementar endpoint para exportar a mancha (polígonos graduais ou raster KMZ) e disponibilizar download.
+3. **Performance**
+   - Cachear resultados SRTM/pycraf (disco ou Redis) e considerar uso de fila assíncrona (RQ/Celery).
+4. **Antena**
+   - Expor métricas avançadas (HPBW, diretividade) e histórico de uploads, além de ajustes finos (normalização manual, espelhamento).
+
+Este documento resume a arquitetura, as melhorias implantadas e o roteiro imediato para corrigir e evoluir a geração de cobertura georreferenciada.

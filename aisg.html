@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Análise Interativa: Padrão AISG v3.0</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    
+    <!-- Chosen Palette: Calm Harmony (Light Gray/Ivory, Dark Gray Text, Muted Blue Accent) -->
+    <!-- Application Structure Plan: A multi-section SPA navigated by a top nav bar. Default view 'Visão Geral' gives a high-level summary. Subsequent sections ('Evolução', 'Protocolo IP', 'Camada Física') provide deep dives. This thematic structure allows users to either get a quick summary or explore specific areas of change, which is more usable than a linear document for understanding the *differences* in the v3.0 spec. Interactions include section navigation, a radar chart for visual comparison, and tabs for physical layer details. -->
+    <!-- Visualization & Content Choices: 1. Report Info: High-level changes (IP, Speed) -> Goal: Inform -> Viz: Styled HTML Cards -> Interaction: None -> Justification: Quick, scannable summary. | 2. Report Info: v2.0 vs v3.0 features -> Goal: Compare -> Viz: Radar Chart (Chart.js) + HTML Table -> Interaction: Chart tooltip -> Justification: Radar gives a quick qualitative "shape" of the improvement, table gives specifics. Library: Chart.js. | 3. Report Info: New IP Stack -> Goal: Organize -> Viz: HTML/Tailwind block diagram -> Interaction: None -> Justification: Simple, clear visual of new layers without SVG/Mermaid. | 4. Report Info: Physical Pinouts (RS-485 vs Eth) -> Goal: Compare -> Viz: Tabbed Content Blocks -> Interaction: Click tabs to toggle content -> Justification: Directly compares two pinouts in the same space, highly relevant to the user's uploaded connector image. -->
+    <!-- CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. -->
+
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .chart-container {
+            position: relative;
+            width: 100%;
+            max-width: 600px;
+            margin-left: auto;
+            margin-right: auto;
+            height: 40vh;
+            max-height: 450px;
+        }
+        @media (max-width: 640px) {
+            .chart-container {
+                height: 50vh;
+                max-height: 400px;
+            }
+        }
+        .nav-btn {
+            @apply px-4 py-2 rounded-md text-sm font-medium text-gray-700 hover:bg-blue-100 hover:text-blue-700 transition-colors duration-200;
+        }
+        .nav-btn.active {
+            @apply bg-blue-600 text-white hover:bg-blue-700 hover:text-white;
+        }
+        .tab-btn {
+            @apply px-4 py-2 rounded-t-lg text-sm font-medium text-gray-600 border-b-2 border-transparent hover:border-blue-500 hover:text-blue-600;
+        }
+        .tab-btn.active {
+            @apply border-blue-600 text-blue-600 font-semibold;
+        }
+        .content-section {
+            display: none;
+        }
+        .content-section.active {
+            display: block;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+    </style>
+</head>
+<body class="bg-gray-50 text-gray-800">
+
+    <header class="bg-white shadow-sm">
+        <div class="container mx-auto px-4 py-5 max-w-6xl">
+            <h1 class="text-3xl font-bold text-blue-800">Análise Interativa: Padrão AISG v3.0</h1>
+            <p class="text-lg text-gray-600 mt-1">Uma exploração das mudanças e novos recursos.</p>
+        </div>
+    </header>
+
+    <nav class="bg-white border-b border-gray-200 sticky top-0 z-10">
+        <div class="container mx-auto px-4 max-w-6xl">
+            <div class="flex space-x-4">
+                <button id="nav-visao-geral" class="nav-btn active" onclick="showSection('visao-geral')">Visão Geral</button>
+                <button id="nav-evolucao" class="nav-btn" onclick="showSection('evolucao')">Evolução (v2.0 vs v3.0)</button>
+                <button id="nav-protocolo-ip" class="nav-btn" onclick="showSection('protocolo-ip')">Protocolo IP (eAISG)</button>
+                <button id="nav-camada-fisica" class="nav-btn" onclick="showSection('camada-fisica')">Camada Física</button>
+            </div>
+        </div>
+    </nav>
+
+    <main class="container mx-auto p-4 max-w-6xl mt-6">
+        
+        <!-- Seção 1: Visão Geral -->
+        <section id="visao-geral" class="content-section active space-y-6">
+            <p class="text-base text-gray-700 leading-relaxed">
+                Esta seção fornece uma introdução de alto nível ao padrão AISG (Antenna Interface Standards Group) e as motivações por trás da versão 3.0. Explore os cartões abaixo para entender as principais mudanças que definem esta atualização significativa, focada em suportar as demandas de redes móveis modernas, como 5G e antenas complexas (MIMO).
+            </p>
+            
+            <div class="grid md:grid-cols-2 gap-6">
+                <div class="bg-white p-6 rounded-lg shadow-lg border border-gray-200">
+                    <h2 class="text-2xl font-semibold text-blue-700 mb-3">O que é AISG?</h2>
+                    <p class="text-gray-700">
+                        AISG é um padrão global para a interface de controle entre uma estação base (BTS) e dispositivos de linha de antena (ALDs), como RETs (Remote Electrical Tilt) e TMAs (Tower Mounted Amplifiers). Ele permite que a estação base configure, monitore e gerencie esses dispositivos remotamente, geralmente sobre o mesmo cabo de RF ou um cabo dedicado.
+                    </p>
+                </div>
+                <div class="bg-white p-6 rounded-lg shadow-lg border border-gray-200">
+                    <h2 class="text-2xl font-semibold text-blue-700 mb-3">Por que a v3.0?</h2>
+                    <p class="text-gray-700">
+                        A versão 2.0 (baseada em RS-485) era suficiente para antenas simples, mas lenta e limitada para sistemas modernos. O 5G, MIMO Massivo e antenas ativas exigem gerenciamento de mais dispositivos, configurações mais complexas e velocidades de comunicação muito maiores. A v3.0 foi criada para endereçar esses desafios, introduzindo principalmente o suporte a IP.
+                    </p>
+                </div>
+            </div>
+
+            <h3 class="text-2xl font-semibold text-gray-900 pt-4">Principais Inovações da v3.0</h3>
+            <div class="grid md:grid-cols-3 gap-6">
+                <div class="bg-white p-6 rounded-lg shadow-md border-t-4 border-blue-500">
+                    <h4 class="text-xl font-bold mb-2">Protocolo IP (eAISG)</h4>
+                    <p class="text-gray-700">A mudança mais significativa. A v3.0 introduz o "eAISG", permitindo que os comandos AISG sejam encapsulados em pacotes UDP/IP. Isso permite a comunicação via Ethernet padrão.</p>
+                </div>
+                <div class="bg-white p-6 rounded-lg shadow-md border-t-4 border-green-500">
+                    <h4 class="text-xl font-bold mb-2">Aumento Drástico de Velocidade</h4>
+                    <p class="text-gray-700">Enquanto o RS-485 (v2.0) opera a 9.6 kbps (ou 38.4 kbps), a nova camada Ethernet (v3.0) suporta 10/100 Mbps. Isso é crucial para baixar software e configurar antenas complexas rapidamente.</p>
+                </div>
+                <div class="bg-white p-6 rounded-lg shadow-md border-t-4 border-purple-500">
+                    <h4 class="text-xl font-bold mb-2">"Ganging" (Multi-ALD)</h4>
+                    <p class="text-gray-700">Define uma forma padrão de um único dispositivo físico (como uma antena multibanda) expor múltiplas unidades lógicas de controle (ALDs). Simplifica o gerenciamento de sistemas de antenas complexos.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Seção 2: Evolução (v2.0 vs v3.0) -->
+        <section id="evolucao" class="content-section space-y-6">
+            <p class="text-base text-gray-700 leading-relaxed">
+                A transição da versão 2.0 para a 3.0 não foi apenas uma atualização, mas uma modernização fundamental. Esta seção compara visualmente os dois padrões usando um gráfico radar para destacar as melhorias em capacidades-chave. A tabela abaixo fornece uma comparação detalhada, parâmetro por parâmetro, para uma análise técnica.
+            </p>
+            
+            <div class="bg-white p-6 rounded-lg shadow-lg">
+                <h2 class="text-2xl font-semibold text-center text-gray-900 mb-4">Comparação Visual: v2.0 vs v3.0</h2>
+                <div class="chart-container">
+                    <canvas id="radarChart"></canvas>
+                </div>
+            </div>
+
+            <div class="bg-white p-6 rounded-lg shadow-lg overflow-x-auto">
+                <h2 class="text-2xl font-semibold text-gray-900 mb-4">Tabela de Comparação de Recursos</h2>
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-gray-100">
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Parâmetro</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">AISG v2.0</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">AISG v3.0</th>
+                        </tr>
+                    </thead>
+                    <tbody class="bg-white divide-y divide-gray-200">
+                        <tr>
+                            <td class="px-6 py-4 whitespace-nowrap font-medium text-gray-900">Protocolo Principal</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-gray-700">HDLC sobre RS-485</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-gray-700">HDLC sobre RS-485 <strong>e/ou AISG sobre UDP/IP</strong></td>
+                        </tr>
+                        <tr>
+                            <td class="px-6 py-4 whitespace-nowrap font-medium text-gray-900">Camada Física</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-gray-700">RS-485</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-gray-700">RS-485 (para compatibilidade) <strong>e Ethernet 10/100Base-T</strong></td>
+                        </tr>
+                        <tr>
+                            <td class="px-6 py-4 whitespace-nowrap font-medium text-gray-900">Taxa de Dados</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-gray-700">9.6 kbps (padrão) / 38.4 kbps</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-gray-700"><strong>10/100 Mbps</strong> (via Ethernet)</td>
+                        </tr>
+                        <tr>
+                            <td class="px-6 py-4 whitespace-nowrap font-medium text-gray-900">Gerenciamento de Dispositivos</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-gray-700">Scan de barramento (lento)</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-gray-700">Scan de barramento <strong>e descoberta baseada em IP (DHCP/mDNS)</strong></td>
+                        </tr>
+                        <tr>
+                            <td class="px-6 py-4 whitespace-nowrap font-medium text-gray-900">Suporte a Multi-ALD ("Ganging")</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-gray-700">Não padronizado (proprietário)</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-gray-700"><strong>Padronizado</strong></td>
+                        </tr>
+                        <tr>
+                            <td class="px-6 py-4 whitespace-nowrap font-medium text-gray-900">Compatibilidade</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-gray-700">Base</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-gray-700"><strong>Totalmente compatível com v2.0</strong> (Mestre v3.0 controla ALDs v2.0)</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Seção 3: Protocolo IP (eAISG) -->
+        <section id="protocolo-ip" class="content-section space-y-6">
+            <p class="text-base text-gray-700 leading-relaxed">
+                A introdução do suporte a IP, conhecida como "eAISG" (Extended AISG), é a pedra angular da v3.0. Esta seção detalha como a nova pilha de protocolos funciona. Em vez de se limitar a uma conexão serial RS-485, a v3.0 permite que os dispositivos de antena sejam cidadãos de primeira classe em uma rede IP, simplificando a integração, melhorando a velocidade e permitindo um gerenciamento muito mais robusto e flexível.
+            </p>
+
+            <div class="bg-white p-6 rounded-lg shadow-lg">
+                <h2 class="text-2xl font-semibold text-gray-900 mb-4">Nova Pilha de Protocolos (eAISG)</h2>
+                <p class="text-gray-700 mb-6">A v3.0 define como os comandos AISG existentes são encapsulados para transporte sobre redes IP. A camada de aplicação AISG (com seus comandos como `SetTilt`, `Scan`, etc.) permanece a mesma, garantindo a compatibilidade. O que muda é o transporte, como ilustrado abaixo.</p>
+                
+                <div class="flex flex-col md:flex-row justify-center items-stretch gap-4">
+                    <!-- Pilha Antiga -->
+                    <div class="flex-1 bg-gray-100 p-4 rounded-lg border border-gray-300">
+                        <h3 class="text-lg font-semibold text-center mb-3 text-gray-700">Pilha AISG v2.0</h3>
+                        <div class="flex flex-col space-y-2">
+                            <div class="bg-blue-200 p-3 rounded text-center text-blue-900 font-medium">Aplicação AISG</div>
+                            <div class="text-center text-gray-500 text-sm">▼</div>
+                            <div class="bg-blue-200 p-3 rounded text-center text-blue-900 font-medium">HDLC</div>
+                            <div class="text-center text-gray-500 text-sm">▼</div>
+                            <div class="bg-blue-200 p-3 rounded text-center text-blue-900 font-medium">RS-485</div>
+                        </div>
+                    </div>
+                    
+                    <!-- Pilha Nova -->
+                    <div class="flex-1 bg-green-100 p-4 rounded-lg border border-green-300">
+                        <h3 class="text-lg font-semibold text-center mb-3 text-green-700">Nova Pilha AISG v3.0 (eAISG)</h3>
+                        <div class="flex flex-col space-y-2">
+                            <div class="bg-green-200 p-3 rounded text-center text-green-900 font-medium">Aplicação AISG</div>
+                            <div class="text-center text-gray-500 text-sm">▼</div>
+                            <div class="bg-green-200 p-3 rounded text-center text-green-900 font-medium">UDP</div>
+                            <div class="text-center text-gray-500 text-sm">▼</div>
+                            <div class="bg-green-200 p-3 rounded text-center text-green-900 font-medium">IP</div>
+                            <div class="text-center text-gray-500 text-sm">▼</div>
+                            <div class="bg-green-200 p-3 rounded text-center text-green-900 font-medium">Ethernet (10/100Base-T)</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+        
+        <!-- Seção 4: Camada Física -->
+        <section id="camada-fisica" class="content-section space-y-6">
+            <p class="text-base text-gray-700 leading-relaxed">
+                Embora o conector físico AISG (o circular de 8 pinos, conforme IEC 60130-9, similar ao da imagem que você forneceu) permaneça o mesmo, a *utilização* desses pinos evoluiu na v3.0 para suportar Ethernet. Esta seção permite que você alterne entre as duas principais configurações de pinagem para entender como o mesmo conector pode suportar tanto o legado RS-485 quanto a nova comunicação baseada em IP.
+            </p>
+
+            <div class="bg-white p-6 rounded-lg shadow-lg">
+                <h2 class="text-2xl font-semibold text-gray-900 mb-1">Pinagem do Conector AISG (Macho/Fêmea 8-pin)</h2>
+                
+                <div class="border-b border-gray-200 mb-4">
+                    <nav class="-mb-px flex space-x-4" aria-label="Tabs">
+                        <button id="tab-rs485" class="tab-btn active" onclick="showTab('rs485')">Legado (v2.0) - RS-485</button>
+                        <button id="tab-ethernet" class="tab-btn" onclick="showTab('ethernet')">Moderno (v3.0) - Ethernet Híbrido</button>
+                    </nav>
+                </div>
+
+                <div id="content-rs485" class="tab-content active">
+                    <h3 class="text-lg font-semibold text-blue-700 mb-3">Configuração Padrão (RS-485)</h3>
+                    <p class="text-gray-700 mb-4">Esta é a pinagem clássica do AISG v2.0, usando um par para dados RS-485 e pinos dedicados para alimentação DC.</p>
+                    <ul class="list-disc list-inside space-y-2 text-gray-800">
+                        <li><strong>Pino 1:</strong> +10-30V DC (Alimentação)</li>
+                        <li><strong>Pino 2:</strong> Não usado</li>
+                        <li><strong>Pino 3:</strong> RS-485 B</li>
+                        <li><strong>Pino 4:</strong> Não usado</li>
+                        <li><strong>Pino 5:</strong> RS-485 A</li>
+                        <li><strong>Pino 6:</strong> Não usado</li>
+                        <li><strong>Pino 7:</strong> DC Retorno (GND)</li>
+                        <li><strong>Pino 8:</strong> Não usado</li>
+                    </ul>
+                </div>
+
+                <div id="content-ethernet" class="tab-content">
+                    <h3 class="text-lg font-semibold text-green-700 mb-3">Configuração v3.0 (Ethernet + RS-485)</h3>
+                    <p class="text-gray-700 mb-4">Para suportar Ethernet e manter a compatibilidade, a v3.0 utiliza os pares não usados anteriormente. Esta é uma implementação "híbrida" comum que permite que o mesmo cabo transporte DC, RS-485 e Ethernet 10/100Base-T simultaneamente.</p>
+                    <ul class="list-disc list-inside space-y-2 text-gray-800">
+                        <li><strong>Pino 1:</strong> +10-30V DC (Alimentação)</li>
+                        <li><strong>Pino 2:</strong> Ethernet RX-</li>
+                        <li><strong>Pino 3:</strong> RS-485 B</li>
+                        <li><strong>Pino 4:</strong> Ethernet TX+</li>
+                        <li><strong>Pino 5:</strong> RS-485 A</li>
+                        <li><strong>Pino 6:</strong> Ethernet TX-</li>
+                        <li><strong>Pino 7:</strong> DC Retorno (GND)</li>
+                        <li><strong>Pino 8:</strong> Ethernet RX+</li>
+                    </ul>
+                    <p class="text-sm text-gray-600 mt-4"><em>Nota: Esta é uma pinagem comum; outras configurações, como PoE (Power over Ethernet), também são possíveis dentro da especificação v3.0, que podem usar os pinos de dados para alimentação.</em></p>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <footer class="text-center py-6 mt-10 border-t border-gray-200">
+        <p class="text-sm text-gray-500">Relatório Interativo Gerado com base na Pesquisa do Padrão AISG v3.0.</p>
+    </footer>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            initRadarChart();
+            
+            showSection('visao-geral');
+            
+            document.querySelectorAll('.nav-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                });
+            });
+            
+            showTab('rs485');
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                });
+            });
+        });
+
+        function showSection(sectionId) {
+            document.querySelectorAll('.content-section').forEach(section => {
+                section.classList.remove('active');
+            });
+            document.getElementById(sectionId).classList.add('active');
+        }
+        
+        function showTab(tabId) {
+            document.querySelectorAll('.tab-content').forEach(content => {
+                content.classList.remove('active');
+            });
+            document.getElementById('content-' + tabId).classList.add('active');
+        }
+
+        function initRadarChart() {
+            const ctx = document.getElementById('radarChart').getContext('2d');
+            
+            Chart.defaults.font.family = "'Inter', sans-serif";
+            
+            new Chart(ctx, {
+                type: 'radar',
+                data: {
+                    labels: ['Velocidade', 'Flexibilidade', 'Gerenciamento', 'Complexidade', 'Compatibilidade'],
+                    datasets: [
+                        {
+                            label: 'AISG v2.0',
+                            data: [2, 3, 5, 3, 9],
+                            backgroundColor: 'rgba(59, 130, 246, 0.2)',
+                            borderColor: 'rgba(59, 130, 246, 1)',
+                            borderWidth: 2,
+                            pointBackgroundColor: 'rgba(59, 130, 246, 1)',
+                            pointBorderColor: '#fff',
+                            pointHoverBackgroundColor: '#fff',
+                            pointHoverBorderColor: 'rgba(59, 130, 246, 1)'
+                        },
+                        {
+                            label: 'AISG v3.0',
+                            data: [9, 9, 8, 6, 9],
+                            backgroundColor: 'rgba(16, 185, 129, 0.2)',
+                            borderColor: 'rgba(16, 185, 129, 1)',
+                            borderWidth: 2,
+                            pointBackgroundColor: 'rgba(16, 185, 129, 1)',
+                            pointBorderColor: '#fff',
+                            pointHoverBackgroundColor: '#fff',
+                            pointHoverBorderColor: 'rgba(16, 185, 129, 1)'
+                        }
+                    ]
+                },
+                options: {
+                    maintainAspectRatio: false,
+                    responsive: true,
+                    scales: {
+                        r: {
+                            angleLines: {
+                                color: 'rgba(0, 0, 0, 0.1)'
+                            },
+                            grid: {
+                                color: 'rgba(0, 0, 0, 0.1)'
+                            },
+                            pointLabels: {
+                                font: {
+                                    size: 14,
+                                    weight: '600'
+                                },
+                                color: '#333'
+                            },
+                            ticks: {
+                                backdropColor: 'rgba(255, 255, 255, 0.75)',
+                                color: '#555',
+                                stepSize: 2,
+                                beginAtZero: true,
+                                max: 10
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                            labels: {
+                                font: {
+                                    size: 14
+                                }
+                            }
+                        },
+                        tooltip: {
+                            enabled: true,
+                            backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                            titleFont: {
+                                weight: 'bold'
+                            },
+                            bodyFont: {
+                                size: 13
+                            },
+                            callbacks: {
+                                label: function(context) {
+                                    let label = context.dataset.label || '';
+                                    if (label) {
+                                        label += ': ';
+                                    }
+                                    if (context.parsed.r !== null) {
+                                        label += context.parsed.r + ' / 10';
+                                    }
+                                    return label;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    </script>
+
+</body>
+</html>
