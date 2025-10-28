@@ -2009,12 +2009,12 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
     Gera todos os artefatos de cobertura (heatmap, barra de cores, metadados)
     em formato compatível com mapa.js / generateCoverage() / applyCoverageOverlay().
 
-    tx  -> objeto "transmissor" (ex: current_user)
+    tx   -> objeto "transmissor" (ex: current_user)
     data -> payload JSON vindo do front (radius, min/max escala, customCenter ...)
     """
 
     # -------------------------------------------------
-    # 1. PARÂMETROS DO TX / AMBIENTE / UI
+    # helpers internos
     # -------------------------------------------------
     def _coerce_optional(value):
         if value is None:
@@ -2029,6 +2029,127 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
         except ValueError:
             return None
 
+    def _determine_auto_scale_local(arr, user_min, user_max):
+        """
+        Decide faixa de cores.
+        Se user_min/max vierem, respeita.
+        Caso contrário usa min/max dos valores finitos.
+        Garante que vmax > vmin.
+        """
+        arr_np = np.asarray(arr, dtype=float)
+        finite_vals = arr_np[np.isfinite(arr_np)]
+        if finite_vals.size == 0:
+            # fallback qualquer para não quebrar
+            return (0.0, 1.0)
+
+        auto_min = float(np.nanmin(finite_vals))
+        auto_max = float(np.nanmax(finite_vals))
+
+        vmin = float(user_min) if user_min is not None else auto_min
+        vmax = float(user_max) if user_max is not None else auto_max
+
+        if abs(vmax - vmin) < 1e-9:
+            vmax = vmin + 1.0
+
+        return (vmin, vmax)
+
+    def _safe_value_at_center(arr, center_idx):
+        """
+        Extrai um valor "representativo" de um array (2D normalmente),
+        tentando pegar no índice [lat, lon] mais próximo do TX.
+        """
+        arr_np = np.asarray(arr, dtype=float)
+        try:
+            return float(arr_np[center_idx])
+        except Exception:
+            # se for escalar
+            if np.ndim(arr_np) == 0:
+                return float(arr_np)
+            finite_mask = np.isfinite(arr_np)
+            if np.any(finite_mask):
+                return float(np.nanmean(arr_np[finite_mask]))
+            return None
+
+    def _summarize_component(arr, center_idx):
+        """
+        min, max e valor central (dB) de um mapa de perdas.
+        """
+        arr_np = np.asarray(arr, dtype=float)
+        finite_mask = np.isfinite(arr_np)
+        if not np.any(finite_mask):
+            return None
+        out = {
+            'min': float(np.nanmin(arr_np)),
+            'max': float(np.nanmax(arr_np)),
+            'unit': 'dB',
+        }
+        try:
+            out['center'] = float(arr_np[center_idx])
+        except Exception:
+            out['center'] = float(np.nanmean(arr_np[finite_mask]))
+        return out
+
+    def adjust_center(radius_km, center_lat, center_lon):
+        """
+        Corrige o centro do raster em função do raio, para compensar
+        o desalinhamento visual do GroundOverlay no Google Maps.
+
+        Usa dois modelos regressivos (model_lat, model_lon) que estimam
+        o quanto precisamos deslocar em graus, e depois aplica fatores
+        empíricos diferentes por faixa de raio.
+
+        Se os modelos não existirem ou der erro -> fallback = sem ajuste.
+        """
+        # fallback (sem ajuste)
+        base_adj_lat = 0.0
+        base_adj_lon = 0.0
+
+        try:
+            # os modelos esperam [[raio]]
+            base_adj_lat = float(model_lat.predict(np.array([[radius_km]], dtype=float))[0])
+            base_adj_lon = float(model_lon.predict(np.array([[radius_km]], dtype=float))[0])
+        except Exception:
+            # sem modelo treinado disponível? não quebra.
+            base_adj_lat = 0.0
+            base_adj_lon = 0.0
+
+        # fatores empíricos
+        if radius_km < 21:
+            scale_factor_lat = 1.90
+            scale_factor_lon = 0.95
+        elif radius_km < 31:
+            scale_factor_lat = 1.40
+            scale_factor_lon = 0.93
+        elif radius_km < 41:
+            scale_factor_lat = 1.28
+            scale_factor_lon = 1.00
+        elif radius_km < 51:
+            scale_factor_lat = 1.21
+            scale_factor_lon = 1.03
+        elif radius_km < 61:
+            scale_factor_lat = 1.19
+            scale_factor_lon = 0.97
+        elif radius_km < 71:
+            scale_factor_lat = 1.17
+            scale_factor_lon = 1.025
+        elif radius_km < 101:
+            scale_factor_lat = 1.10
+            scale_factor_lon = 1.027
+        else:
+            # acima de 100 km ainda não calibrado -> último conhecido
+            scale_factor_lat = 1.10
+            scale_factor_lon = 1.027
+
+        # aplica deslocamento (mesma lógica que você mandou: center - adj*scale)
+        new_lat = center_lat - base_adj_lat * scale_factor_lat
+        new_lon = center_lon - base_adj_lon * scale_factor_lon
+
+        return float(new_lat), float(new_lon)
+
+    # -------------------------------------------------
+    # 1. PARÂMETROS DO TX / AMBIENTE / UI
+    # -------------------------------------------------
+
     # perdas fixas sistêmicas (cabos, conectores) [dB]
     loss_sys_db = tx.total_loss or 0.0
 
@@ -2041,7 +2162,7 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
     # ganho da RX [dBi]
     Grx_dBi = tx.rx_gain or 0.0
 
-    # override de centro vindo do front
+    # override de centro vindo do front (posição "real"/visível da TX)
     center_override = data.get('customCenter') or {}
     try:
         lon_tx_deg = float(center_override.get('lng', tx.longitude))
@@ -2055,15 +2176,18 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
         radius_requested = 10.0
     radius_km = float(radius_requested)
 
-    lon_tx = lon_tx_deg * u.deg
-    lat_tx = lat_tx_deg * u.deg
+    # >>> AQUI entra o teu ajuste empírico
+    lat_ref_deg, lon_ref_deg = adjust_center(radius_km, lat_tx_deg, lon_tx_deg)
+
+    # esses são os centros que vamos usar pro cálculo SRTM / pycraf
+    lat_ref = lat_ref_deg * u.deg
+    lon_ref = lon_ref_deg * u.deg
 
     # frequência (MHz → GHz p/ pycraf)
     freq_mhz = getattr(tx, 'frequencia', None) or 100.0
     if freq_mhz < 100.0:
-        # limite mínimo pra manter coerência interna
         freq_mhz = 100.0
-    frequency = (freq_mhz / 1000.0) * u.GHz  # pycraf usa GHz internamente
+    frequency = (freq_mhz / 1000.0) * u.GHz  # pycraf usa GHz
 
     # alturas TX / RX acima do solo
     rx_height_m = tx.rx_height if tx.rx_height is not None else 1.0
@@ -2093,7 +2217,9 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
     map_resolution = _select_map_resolution(radius_km)
 
     # bounding box geodésico aproximado só pra recortar SRTM
-    bounds_hint = calculate_geodesic_bounds(lon_tx_deg, lat_tx_deg, radius_km)
+    # IMPORTANTE: usamos o centro AJUSTADO aqui, pois é ele que vamos
+    # realmente rasterizar.
+    bounds_hint = calculate_geodesic_bounds(lon_ref_deg, lat_ref_deg, radius_km)
 
     def _span_deg(a, b):
         span = abs(float(a) - float(b))
@@ -2132,6 +2258,7 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
 
     # -------------------------------------------------
     # 2. GERA GRID DE TERRENO + ATENUAÇÃO P.452
+    #     (usando o centro AJUSTADO!)
     # -------------------------------------------------
     with pathprof.SrtmConf.set(
         srtm_dir='./SRTM',
@@ -2139,8 +2266,8 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
         server='viewpano'
     ):
         hprof_cache = pathprof.height_map_data(
-            lon_tx,
-            lat_tx,
+            lon_ref,
+            lat_ref,
             map_size_lon,
             map_size_lat,
             map_resolution=map_resolution,
@@ -2161,7 +2288,7 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
         base_water_density=(water_density if water_density is not None else 7.5) * u.g / u.m**3
     )
 
-    # vetores 1D de coordenadas
+    # vetores 1D de coordenadas (centros de pixel) do RASTER AJUSTADO
     _lons = hprof_cache['xcoords']
     _lats = hprof_cache['ycoords']
 
@@ -2187,11 +2314,11 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
     _total_atten = u.Quantity(total_path_loss_db, u.dB)
 
     # -------------------------------------------------
-    # 4. AJUSTE DE DIMENSÃO (lat, lon) ↔ matriz
-    #    (garante orientação [nlat, nlon])
+    # 4. AJUSTE DE DIMENSÃO (garante [nlat, nlon])
     # -------------------------------------------------
     lons_deg = np.asarray(_to_degree_array(_lons), dtype=float)
     lats_deg = np.asarray(_to_degree_array(_lats), dtype=float)
+
     if lons_deg.ndim == 2:
         lons_deg = lons_deg[0, :]
     else:
@@ -2204,7 +2331,7 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
     nlon = int(lons_deg.size)
     nlat = int(lats_deg.size)
 
-    # se a matriz veio (nlon, nlat), transpõe pra (nlat, nlon)
+    # Se a matriz veio (nlon, nlat), transpõe pra (nlat, nlon).
     if total_path_loss_db.shape == (nlon, nlat):
         total_path_loss_db = total_path_loss_db.T
         _total_atten = u.Quantity(total_path_loss_db, u.dB)
@@ -2213,33 +2340,31 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
         if total_path_loss_db.T.shape == (nlat, nlon):
             total_path_loss_db = total_path_loss_db.T
             _total_atten = u.Quantity(total_path_loss_db, u.dB)
-        # se ainda não bateu, seguimos assim mesmo (vamos tentar reshape depois se necessário)
+        # se ainda não bateu, seguimos assim mesmo
 
-    # bounds que vão direto pro GroundOverlay
-    bounds = {
-        'north': float(np.nanmax(lats_deg)),
-        'south': float(np.nanmin(lats_deg)),
-        'east':  float(np.nanmax(lons_deg)),
-        'west':  float(np.nanmin(lons_deg)),
-    }
-    lat_span = max(bounds['north'] - bounds['south'], 1e-6)
-    colorbar_height = max(lat_span * 0.05, 1e-4)
-    colorbar_bounds = {
-        'north': bounds['north'],
-        'south': bounds['north'] - colorbar_height,
-        'east':  bounds['east'],
-        'west':  bounds['west'],
-    }
+    # tamanhos angulares médios por pixel (pra calcular bounds com meia célula)
+    if lons_deg.size > 1:
+        dlon = float(np.median(np.abs(np.diff(lons_deg))))
+    else:
+        dlon = 0.0
+    if lats_deg.size > 1:
+        dlat = float(np.median(np.abs(np.diff(lats_deg))))
+    else:
+        dlat = 0.0
 
     # -------------------------------------------------
-    # 5. PADRÃO DE ANTENA / ROTAÇÃO DE +90°
+    # 5. PADRÃO DE ANTENA / CORREÇÃO DE ORIENTAÇÃO (+90°)
     # -------------------------------------------------
     gain_comp_raw = _compute_gain_components(tx, hprof_cache)
+
     horiz_grid = gain_comp_raw['horizontal_gain_grid_db']
     vert_grid  = gain_comp_raw['vertical_gain_grid_db']
 
-    # força coerência de forma com total_path_loss_db (nlat,nlon)
     def _coerce_gain_grid(arr, target_shape):
+        """
+        Garante que horiz_grid / vert_grid tenham shape (nlat, nlon)
+        e possam somar com total_path_loss_db.
+        """
         if np.isscalar(arr) or arr is None:
             return np.zeros(target_shape, dtype=float)
 
@@ -2266,8 +2391,8 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
     horiz_grid = _coerce_gain_grid(horiz_grid, total_path_loss_db.shape)
     vert_grid  = _coerce_gain_grid(vert_grid,  total_path_loss_db.shape)
 
-    # correção do offset de +90°:
-    # se o grid for quadrado, rotaciona 90° horário (k=3)
+    # correção de +90° no padrão (offset entre diagrama e mapa):
+    # rotaciona ambos 90° horário (np.rot90(..., k=3))
     if horiz_grid.shape == vert_grid.shape and horiz_grid.shape[0] == horiz_grid.shape[1]:
         horiz_grid = np.rot90(horiz_grid, k=3)
         vert_grid  = np.rot90(vert_grid,  k=3)
@@ -2309,8 +2434,9 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
 
     # -------------------------------------------------
     # 7. MÁSCARA CIRCULAR (preencher TODO o disco)
+    #    IMPORTANTE: o círculo é em torno da TX REAL (lat_tx_deg/lon_tx_deg),
+    #    não do centro ajustado.
     # -------------------------------------------------
-    # grade 2D de lon/lat
     lon_grid, lat_grid = np.meshgrid(lons_deg, lats_deg)
 
     def _haversine_km(lat1, lon1, lat2, lon2):
@@ -2321,11 +2447,13 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
         lon2r = np.radians(lon2)
         dlat  = lat2r - lat1r
         dlon  = lon2r - lon1r
-        a = np.sin(dlat / 2.0)**2 + np.cos(lat1r) * np.cos(lat2r) * np.sin(dlon / 2.0)**2
+        a = (
+            np.sin(dlat / 2.0) ** 2
+            + np.cos(lat1r) * np.cos(lat2r) * np.sin(dlon / 2.0) ** 2
+        )
         return 2.0 * R * np.arcsin(np.sqrt(a))
 
     dist_km_grid = _haversine_km(lat_grid, lon_grid, lat_tx_deg, lon_tx_deg)
-
     inrange_mask = dist_km_grid <= radius_km
 
     # inicializa com NaN
@@ -2351,41 +2479,64 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
     # -------------------------------------------------
     # 8. ESCALA DE CORES
     # -------------------------------------------------
-    def _determine_auto_scale_local(arr, user_min, user_max):
-        # usa mesma lógica do teu _determine_auto_scale: se usuário não passou,
-        # pega percentis razoáveis. Aqui, simplificado: min/max finitos.
-        arr_np = np.asarray(arr, dtype=float)
-        finite_vals = arr_np[np.isfinite(arr_np)]
-        if finite_vals.size == 0:
-            return (0.0, 1.0)
-        auto_min = float(np.nanmin(finite_vals))
-        auto_max = float(np.nanmax(finite_vals))
-        vmin = float(user_min) if user_min is not None else auto_min
-        vmax = float(user_max) if user_max is not None else auto_max
-        # evita intervalo zero
-        if abs(vmax - vmin) < 1e-9:
-            vmax = vmin + 1.0
-        return (vmin, vmax)
-
     min_val, max_val = _determine_auto_scale_local(E_plot, min_valu, max_valu)
     if min_valu is None and max_valu is None:
-        # fallback padrão se não rolou nada customizado
-        if not np.isfinite(min_val) or not np.isfinite(max_val):
+        if (not np.isfinite(min_val)) or (not np.isfinite(max_val)):
             min_val, max_val = 10.0, 60.0
 
     power_min, power_max = _determine_auto_scale_local(Prx_plot, None, None)
 
     # -------------------------------------------------
-    # 9. STATUS CLIMÁTICO / METRICAS DO CENTRO
+    # 9. ENCONTRAR ÍNDICE DO PIXEL MAIS PRÓXIMO DO TX REAL
+    #    (pra summaries e painéis do front)
     # -------------------------------------------------
-    # status climático
+    lat_diff = np.abs(lats_deg - lat_tx_deg)
+    lon_diff = np.abs(lons_deg - lon_tx_deg)
+    center_idx_lat = int(np.argmin(lat_diff))
+    center_idx_lon = int(np.argmin(lon_diff))
+    center_idx = (center_idx_lat, center_idx_lon)
+
+    # -------------------------------------------------
+    # 10. BOUNDS DO OVERLAY
+    #     usamos a grade AJUSTADA (lat_ref_deg/lon_ref_deg),
+    #     sem mais delta sub-pixel. Só expandimos meia célula.
+    # -------------------------------------------------
+    lat_min_center = float(np.nanmin(lats_deg))
+    lat_max_center = float(np.nanmax(lats_deg))
+    lon_min_center = float(np.nanmin(lons_deg))
+    lon_max_center = float(np.nanmax(lons_deg))
+
+    south_edge = lat_min_center - dlat / 2.0
+    north_edge = lat_max_center + dlat / 2.0
+    west_edge  = lon_min_center - dlon / 2.0
+    east_edge  = lon_max_center + dlon / 2.0
+
+    bounds = {
+        'north': north_edge,
+        'south': south_edge,
+        'east':  east_edge,
+        'west':  west_edge,
+    }
+
+    lat_span = max(bounds['north'] - bounds['south'], 1e-6)
+    colorbar_height = max(lat_span * 0.05, 1e-4)
+    colorbar_bounds = {
+        'north': bounds['north'],
+        'south': bounds['north'] - colorbar_height,
+        'east':  bounds['east'],
+        'west':  bounds['west'],
+    }
+
+    # -------------------------------------------------
+    # 11. STATUS CLIMÁTICO / MÉTRICAS DO CENTRO
+    # -------------------------------------------------
     climate_lat = getattr(tx, 'climate_lat', None)
     climate_lon = getattr(tx, 'climate_lon', None)
     location_changed = True
     if climate_lat is not None and climate_lon is not None:
-        dlat = abs(float(climate_lat) - lat_tx_deg)
-        dlon = abs(float(climate_lon) - lon_tx_deg)
-        location_changed = max(dlat, dlon) > 1e-4
+        dlat_check = abs(float(climate_lat) - lat_tx_deg)
+        dlon_check = abs(float(climate_lon) - lon_tx_deg)
+        location_changed = max(dlat_check, dlon_check) > 1e-4
 
     if location_changed:
         location_status = (
@@ -2403,26 +2554,7 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
                 'Localização confirmada. Ajuste climático ainda não foi registrado para este ponto.'
             )
 
-    # índice [lat,lon] mais próximo do centro
-    lat_diff = np.abs(lats_deg - lat_tx_deg)
-    lon_diff = np.abs(lons_deg - lon_tx_deg)
-    center_idx_lat = int(np.argmin(lat_diff))
-    center_idx_lon = int(np.argmin(lon_diff))
-    center_idx = (center_idx_lat, center_idx_lon)
-
-    def _safe_value(arr):
-        arr_np = np.asarray(arr, dtype=float)
-        try:
-            return float(arr_np[center_idx])
-        except Exception:
-            if np.ndim(arr_np) == 0:
-                return float(arr_np)
-            finite_mask = np.isfinite(arr_np)
-            if np.any(finite_mask):
-                return float(np.nanmean(arr_np[finite_mask]))
-            return None
-
-    # path_type (LoS, ducting etc.) no ponto central, se disponível
+    # path_type (LoS, ducting etc.) no ponto central
     path_type_info = results.get('path_type')
     path_type_value = None
     if path_type_info is not None:
@@ -2437,36 +2569,18 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
         except Exception:
             path_type_value = None
 
-    # resumo dos componentes de perda
-    def _summarize_component(arr):
-        arr_np = np.asarray(arr, dtype=float)
-        finite_mask = np.isfinite(arr_np)
-        if not np.any(finite_mask):
-            return None
-        out = {
-            'min': float(np.nanmin(arr_np)),
-            'max': float(np.nanmax(arr_np)),
-            'unit': 'dB',
-        }
-        try:
-            out['center'] = float(arr_np[center_idx])
-        except Exception:
-            out['center'] = float(np.nanmean(arr_np[finite_mask]))
-        return out
-
     loss_components_summary = {}
     for k, arr in loss_maps.items():
-        s = _summarize_component(arr)
+        s = _summarize_component(arr, center_idx)
         if s:
             loss_components_summary[k] = s
 
-    # métricas do centro (pra debug/inspeção avançada no client)
     center_metrics = {
         'path_type': path_type_value,
-        'combined_loss_center_db': _safe_value(total_path_loss_db),
-        'received_power_center_dbm': _safe_value(Prx_dbm),
-        'field_center_dbuv_m': _safe_value(E_dbuv),
-        'effective_gain_center_db': _safe_value(Gtx_eff_db),
+        'combined_loss_center_db': _safe_value_at_center(total_path_loss_db, center_idx),
+        'received_power_center_dbm': _safe_value_at_center(Prx_dbm, center_idx),
+        'field_center_dbuv_m': _safe_value_at_center(E_dbuv, center_idx),
+        'effective_gain_center_db': _safe_value_at_center(Gtx_eff_db, center_idx),
         'tx_power_dbm': float(Ptx_dBm),
         'system_losses_db': float(loss_sys_db),
         'frequency_mhz': float(freq_mhz),
@@ -2479,10 +2593,8 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
         pass
 
     # -------------------------------------------------
-    # 10. IMAGENS (heatmap/base64) p/ overlay e barra
+    # 12. IMAGENS (heatmap/base64) p/ overlay e barra
     # -------------------------------------------------
-    # Nota: _render_field_strength_image precisa aceitar NaN fora do raio
-    # e gerar PNG com alpha=0 nessas regiões. dist_map_km agora é dist_km_grid
     img_dbuv_b64, colorbar_dbuv_b64 = _render_field_strength_image(
         lons_deg,
         lats_deg,
@@ -2512,7 +2624,7 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
     )
 
     # -------------------------------------------------
-    # 11. DICIONÁRIOS DE NÍVEL DE CAMPO (p/ clique RX)
+    # 13. DICIONÁRIOS DE NÍVEL DE CAMPO (p/ clique RX)
     # -------------------------------------------------
     signal_level_dict = {}
     signal_level_dict_dbm = {}
@@ -2528,14 +2640,16 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
                     signal_level_dict_dbm[f"({lat_val}, {lon_val})"] = float(Prx_dbm[i, j])
 
     # -------------------------------------------------
-    # 12. GAIN COMPONENTS (interface com updateGainSummary)
+    # 14. GAIN COMPONENTS (interface com updateGainSummary no front)
     # -------------------------------------------------
-    # horizontal_adjustment_db_min / max -> range do padrão horizontal aplicado
-    horiz_min = float(np.nanmin(horiz_grid)) if np.isfinite(horiz_grid).any() else 0.0
-    horiz_max = float(np.nanmax(horiz_grid)) if np.isfinite(horiz_grid).any() else 0.0
+    if np.isfinite(horiz_grid).any():
+        horiz_min = float(np.nanmin(horiz_grid))
+        horiz_max = float(np.nanmax(horiz_grid))
+    else:
+        horiz_min = 0.0
+        horiz_max = 0.0
 
-    # vertical_adjustment_db -> valor "representativo" (centro)
-    vert_center = _safe_value(vert_grid)
+    vert_center = _safe_value_at_center(vert_grid, center_idx)
     if vert_center is None or not np.isfinite(vert_center):
         vert_center = 0.0
 
@@ -2558,7 +2672,7 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
     }
 
     # -------------------------------------------------
-    # 13. OBJETO FINAL (compatível com mapa.js)
+    # 15. OBJETO FINAL (compatível com mapa.js)
     # -------------------------------------------------
     payload = {
         "images": {
@@ -2575,8 +2689,12 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
                 "unit": "dBm",
             },
         },
+
+        # bounds agora vêm da malha calculada em torno do centro AJUSTADO
+        # (ou seja, já com o deslocamento empírico por raio)
         "bounds": bounds,
         "colorbar_bounds": colorbar_bounds,
+
         "scale": {
             "default_unit": "dbuv",
             "min": min_val,
@@ -2586,8 +2704,12 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
                 "dbm": {"min": power_min, "max": power_max},
             },
         },
+
+        # AQUI mandamos a posição REAL da TX (marcador vermelho),
+        # pra desenhar o círculo azul e pra atualizar o painel.
         "center": {"lat": float(lat_tx_deg), "lng": float(lon_tx_deg)},
         "requested_radius_km": radius_km,
+
         "location_status": location_status,
         "location_changed": location_changed,
         "tx_location_name": getattr(tx, 'tx_location_name', None),
@@ -2595,25 +2717,27 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None):
         "climate_updated_at": tx.climate_updated_at.isoformat()
             if getattr(tx, 'climate_updated_at', None) else None,
 
-        # >>> usado em refreshDirectionGuide() e updateDirectionGuide()
+        # usado no front para desenhar a linha de azimute (refreshDirectionGuide)
         "antenna_direction": getattr(tx, 'antenna_direction', None),
 
-        # >>> usado em updateGainSummary() no front
+        # resumo de ganho usado em updateGainSummary()
         "gain_components": gain_components_payload,
 
         "loss_components": loss_components_summary,
         "center_metrics": center_metrics,
 
-        # >>> usados por computeReceiverSummary() pra estimar o nível no RX
+        # usado por computeReceiverSummary() pra estimar o nível no RX clicado
         "signal_level_dict": signal_level_dict,
         "signal_level_dict_dbm": signal_level_dict_dbm,
     }
 
-    # label opcional pra debug (não é usado no front mas não atrapalha)
     if label is not None:
         payload["label"] = str(label)
 
     return payload
+
+
+
 
 
 @bp.route('/calculate-coverage', methods=['POST'])
