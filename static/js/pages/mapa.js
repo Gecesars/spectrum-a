@@ -8,144 +8,22 @@ const state = {
     rxEntries: [],
     selectedRxIndex: null,
     linkLine: null,
+    directionLine: null,
     coverageOverlay: null,
-    CoverageOverlayClass: null,
     radiusCircle: null,
     coverageData: null,
-    coverageRadiusKm: null,
-    coverageStale: false,
-    coverageUnit: 'dbuv',
-    coverageImages: null,
-    coverageScales: null,
-    signalLevelDict: { dbuv: {}, dbm: {} },
-    lossComponents: null,
-    centerMetrics: null,
     overlayOpacity: OVERLAY_DEFAULT_OPACITY,
     elevationService: null,
     pendingTiltTimeout: null,
+    pendingDirectionTimeout: null,
+    coverageUnit: 'dbuv',
 };
-
-function ensureCoverageOverlayClass() {
-    if (state.CoverageOverlayClass) {
-        return state.CoverageOverlayClass;
-    }
-    class CoverageImageOverlay extends google.maps.OverlayView {
-        constructor(bounds, imageSrc, opacity) {
-            super();
-            this.bounds = bounds;
-            this.imageSrc = imageSrc;
-            this.opacity = opacity;
-            this.div = null;
-            this.img = null;
-        }
-
-        onAdd() {
-            this.div = document.createElement('div');
-            this.div.style.position = 'absolute';
-            this.div.style.pointerEvents = 'none';
-
-            this.img = document.createElement('img');
-            this.img.src = this.imageSrc;
-            this.img.style.position = 'absolute';
-            this.img.style.width = '100%';
-            this.img.style.height = '100%';
-            this.img.style.opacity = this.opacity;
-            this.img.style.pointerEvents = 'none';
-
-            this.div.appendChild(this.img);
-            const panes = this.getPanes();
-            panes.overlayLayer.appendChild(this.div);
-        }
-
-        draw() {
-            if (!this.div) return;
-            const projection = this.getProjection();
-            const sw = projection.fromLatLngToDivPixel(this.bounds.getSouthWest());
-            const ne = projection.fromLatLngToDivPixel(this.bounds.getNorthEast());
-
-            this.div.style.left = `${sw.x}px`;
-            this.div.style.top = `${ne.y}px`;
-            this.div.style.width = `${ne.x - sw.x}px`;
-            this.div.style.height = `${sw.y - ne.y}px`;
-        }
-
-        onRemove() {
-            if (this.div && this.div.parentNode) {
-                this.div.parentNode.removeChild(this.div);
-            }
-            this.div = null;
-            this.img = null;
-        }
-
-        setOpacity(opacity) {
-            this.opacity = opacity;
-            if (this.img) {
-                this.img.style.opacity = opacity;
-            }
-        }
-    }
-
-    state.CoverageOverlayClass = CoverageImageOverlay;
-    return CoverageImageOverlay;
-}
 
 function formatNumber(value, suffix = '') {
     if (value === undefined || value === null || Number.isNaN(value)) {
         return '-';
     }
     return `${Number(value).toFixed(2)}${suffix}`;
-}
-
-function formatDbValue(value, unit = 'dB') {
-    if (value === undefined || value === null || Number.isNaN(value)) {
-        return '-';
-    }
-    return `${Number(value).toFixed(1)} ${unit}`;
-}
-
-let locationUpdateAbort = null;
-
-function syncTxLocation(latLng) {
-    if (!latLng) return;
-    const payload = {
-        latitude: latLng.lat(),
-        longitude: latLng.lng(),
-    };
-
-    if (locationUpdateAbort) {
-        locationUpdateAbort.abort();
-    }
-    locationUpdateAbort = new AbortController();
-
-    fetch('/tx-location', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: locationUpdateAbort.signal,
-    }).then((response) => {
-        if (!response.ok) {
-            throw new Error('Falha ao atualizar localização da TX');
-        }
-        return response.json();
-    }).then((data) => {
-        if (!state.txData) {
-            state.txData = {};
-        }
-        if (data.municipality !== undefined) {
-            state.txData.txLocationName = data.municipality;
-        }
-        if (data.elevation !== undefined) {
-            state.txData.txElevation = data.elevation;
-        }
-        updateTxSummary(state.txData);
-    }).catch((error) => {
-        if (error.name === 'AbortError') {
-            return;
-        }
-        console.error(error);
-    }).finally(() => {
-        locationUpdateAbort = null;
-    });
 }
 
 function formatDb(value) {
@@ -155,14 +33,96 @@ function formatDb(value) {
     return `${Number(value).toFixed(2)} dB`;
 }
 
+function normalizeAzimuth(value) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) {
+        return 0;
+    }
+    return ((num % 360) + 360) % 360;
+}
+
+function formatAzimuth(value) {
+    if (value === undefined || value === null || Number.isNaN(Number(value))) {
+        return '-';
+    }
+    return `${normalizeAzimuth(value).toFixed(1)}°`;
+}
+
 function updateRadiusLabel() {
     const radiusInput = document.getElementById('radiusInput');
     const radiusValue = document.getElementById('radiusValue');
     radiusValue.textContent = `${radiusInput.value} km`;
+    refreshDirectionGuide();
 }
 
 function updateTiltLabel(value) {
     document.getElementById('tiltValue').textContent = `${Number(value).toFixed(1)}°`;
+}
+
+function updateDirectionLabel(value) {
+    const display = document.getElementById('directionValue');
+    if (!display) {
+        return;
+    }
+    display.textContent = `${normalizeAzimuth(value).toFixed(1)}°`;
+}
+
+function clearDirectionLine() {
+    if (state.directionLine) {
+        state.directionLine.setMap(null);
+        state.directionLine = null;
+    }
+}
+
+function getActiveRadiusKm() {
+    if (state.coverageData && Number.isFinite(state.coverageData.requested_radius_km)) {
+        return Number(state.coverageData.requested_radius_km);
+    }
+    const radiusInput = document.getElementById('radiusInput');
+    if (radiusInput) {
+        const sliderValue = Number(radiusInput.value);
+        if (Number.isFinite(sliderValue) && sliderValue > 0) {
+            return sliderValue;
+        }
+    }
+    return 10;
+}
+
+function updateDirectionGuide(direction) {
+    if (!state.map || !state.txCoords) {
+        return;
+    }
+    const heading = normalizeAzimuth(direction);
+    const radiusKm = Math.max(getActiveRadiusKm(), 1);
+    const lineLength = Math.max(radiusKm * 1000, 500);
+    const endPoint = google.maps.geometry.spherical.computeOffset(state.txCoords, lineLength, heading);
+    const path = [state.txCoords, endPoint];
+    clearDirectionLine();
+    state.directionLine = new google.maps.Polyline({
+        map: state.map,
+        path,
+        strokeColor: '#ef6c00',
+        strokeOpacity: 0.95,
+        strokeWeight: 2,
+        icons: [{
+            icon: {
+                path: 'M 0,-1 0,1',
+                strokeOpacity: 1,
+                scale: 3,
+            },
+            offset: '0',
+            repeat: '12px',
+        }],
+    });
+}
+
+function refreshDirectionGuide() {
+    const direction = state.txData?.antennaDirection;
+    if (direction === undefined || direction === null) {
+        clearDirectionLine();
+        return;
+    }
+    updateDirectionGuide(direction);
 }
 
 function updateTxSummary(data) {
@@ -172,65 +132,41 @@ function updateTxSummary(data) {
     document.getElementById('txModel').textContent = data.propagationModel || '-';
     updateTiltLabel(data.antennaTilt || 0);
     document.getElementById('tiltControl').value = data.antennaTilt ?? 0;
-
-    const municipalityEl = document.getElementById('txMunicipio');
-    if (municipalityEl) {
-        municipalityEl.textContent = data.txLocationName || '-';
-    }
-    const elevationEl = document.getElementById('txElevation');
-    if (elevationEl) {
-        const elevation = data.txElevation !== undefined && data.txElevation !== null
-            ? `${Number(data.txElevation).toFixed(1)} m`
-            : '-';
-        elevationEl.textContent = elevation;
-    }
-    const climateEl = document.getElementById('txClimateInfo');
-    if (climateEl) {
-        if (data.climateUpdatedAt) {
-            const date = new Date(data.climateUpdatedAt);
-            climateEl.textContent = `Clima ajustado em ${date.toLocaleString('pt-BR', { timeZone: 'UTC' })} UTC`;
-        } else {
-            climateEl.textContent = 'Clima não ajustado para esta localização';
-        }
+    document.getElementById('txDirection').textContent =
+        data.antennaDirection === undefined || data.antennaDirection === null
+            ? '-'
+            : formatAzimuth(data.antennaDirection);
+    const directionControl = document.getElementById('directionControl');
+    if (directionControl) {
+        const directionValue = data.antennaDirection === undefined || data.antennaDirection === null
+            ? 0
+            : normalizeAzimuth(data.antennaDirection);
+        directionControl.value = directionValue;
+        updateDirectionLabel(directionValue);
     }
 }
 
-function updateGainSummary(gainComponents) {
+function updateGainSummary(gainComponents, scale) {
     if (!gainComponents) {
         document.getElementById('gainBase').textContent = '-';
         document.getElementById('gainHorizontal').textContent = '-';
         document.getElementById('gainVertical').textContent = '-';
+        document.getElementById('fieldScale').textContent = '-';
         return;
     }
     document.getElementById('gainBase').textContent = formatDb(gainComponents.base_gain_dbi || 0);
+
     if (gainComponents.horizontal_adjustment_db_min !== undefined) {
         const min = formatDb(gainComponents.horizontal_adjustment_db_min);
         const max = formatDb(gainComponents.horizontal_adjustment_db_max);
         document.getElementById('gainHorizontal').textContent = `${min} / ${max}`;
-    } else {
-        document.getElementById('gainHorizontal').textContent = '-';
     }
-    if (gainComponents.vertical_adjustment_db_min !== undefined) {
-        const minV = formatDb(gainComponents.vertical_adjustment_db_min);
-        const maxV = formatDb(gainComponents.vertical_adjustment_db_max);
-        document.getElementById('gainVertical').textContent = `${minV} / ${maxV}`;
-    } else {
-        document.getElementById('gainVertical').textContent = '-';
-    }
-}
 
-function updateScaleReadout(unitKey = state.coverageUnit || 'dbuv') {
-    if (!state.coverageData || !state.coverageData.scale) {
-        document.getElementById('fieldScale').textContent = '-';
-        return;
-    }
-    const scaleInfo = state.coverageData.scale.units || {};
-    const entry = scaleInfo[unitKey] || { min: state.coverageData.scale.min, max: state.coverageData.scale.max };
-    const label = unitKey === 'dbm' ? 'dBm' : 'dBµV/m';
-    if (entry && entry.min !== undefined && entry.max !== undefined) {
-        document.getElementById('fieldScale').textContent = `${formatNumber(entry.min)} – ${formatNumber(entry.max)} ${label}`;
-    } else {
-        document.getElementById('fieldScale').textContent = '-';
+    document.getElementById('gainVertical').textContent = formatDb(gainComponents.vertical_adjustment_db);
+
+    if (scale) {
+        document.getElementById('fieldScale').textContent =
+            `${formatNumber(scale.min)} – ${formatNumber(scale.max)} dBµV/m`;
     }
 }
 
@@ -244,219 +180,14 @@ function showToast(message, isError = false) {
     }, 3600);
 }
 
-function setCoverageStatus(message) {
-    const badge = document.getElementById('coverageStatus');
-    if (!badge) return;
-    if (message) {
-        badge.hidden = false;
-        badge.innerHTML = message;
-    } else {
-        badge.hidden = true;
-        badge.textContent = '';
-    }
-}
-
 function setCoverageLoading(isLoading) {
     const spinner = document.getElementById('coverageSpinner');
-    const button = document.getElementById('btnGenerateCoverage');
     if (spinner) {
         spinner.hidden = !isLoading;
     }
+    const button = document.getElementById('btnGenerateCoverage');
     if (button) {
         button.disabled = isLoading;
-    }
-}
-
-function markCoverageStale(message = 'Cobertura desatualizada. Gere novamente.') {
-    state.coverageStale = true;
-    setCoverageStatus(message);
-    state.signalLevelDict = { dbuv: {}, dbm: {} };
-    state.rxEntries.forEach((entry, idx) => {
-        if (!entry.summary) return;
-        const inside = entry.summary.insideCoverage !== false;
-        entry.summary.field_dbuv = undefined;
-        entry.summary.field_dbm = undefined;
-        entry.summary.pendingField = inside;
-        if (idx === state.selectedRxIndex) {
-            updateLinkSummary(entry.summary);
-        }
-    });
-    renderRxList();
-}
-
-function clearCoverageStatus() {
-    state.coverageStale = false;
-    setCoverageStatus('');
-}
-
-function updateUnitButtons(unitKey) {
-    const buttons = {
-        dbuv: document.getElementById('unitDbuv'),
-        dbm: document.getElementById('unitDbm'),
-    };
-    Object.entries(buttons).forEach(([key, button]) => {
-        if (!button) return;
-        if (key === unitKey) {
-            button.classList.add('active');
-            button.setAttribute('aria-pressed', 'true');
-        } else {
-            button.classList.remove('active');
-            button.setAttribute('aria-pressed', 'false');
-        }
-    });
-}
-
-function updateUnitAvailability() {
-    const btnDbuv = document.getElementById('unitDbuv');
-    const btnDbm = document.getElementById('unitDbm');
-    const images = state.coverageData?.images || {};
-    const hasDbuv = Boolean(images.dbuv?.image || state.coverageData?.image);
-    const hasDbm = Boolean(images.dbm?.image);
-    if (btnDbuv) {
-        btnDbuv.disabled = !hasDbuv;
-        btnDbuv.classList.toggle('disabled', !hasDbuv);
-    }
-    if (btnDbm) {
-        btnDbm.disabled = !hasDbm;
-        btnDbm.classList.toggle('disabled', !hasDbm);
-        if (!hasDbm) {
-            btnDbm.classList.remove('active');
-            btnDbm.setAttribute('aria-pressed', 'false');
-        }
-    }
-}
-
-function setCoverageUnit(unitKey) {
-    if (!state.coverageData) return;
-    updateUnitAvailability();
-    applyCoverageOverlay(unitKey);
-    updateScaleReadout(unitKey);
-    updateUnitButtons(unitKey);
-    if (state.selectedRxIndex !== null) {
-        const entry = state.rxEntries[state.selectedRxIndex];
-        if (entry && entry.summary) {
-            updateLinkSummary(entry.summary);
-        }
-    }
-    renderRxList();
-}
-
-let txLocationAbortController = null;
-
-function syncTxLocation(latLng) {
-    if (!latLng) return;
-    const payload = {
-        latitude: latLng.lat(),
-        longitude: latLng.lng(),
-    };
-
-    if (txLocationAbortController) {
-        txLocationAbortController.abort();
-    }
-    txLocationAbortController = new AbortController();
-
-    fetch('/tx-location', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: txLocationAbortController.signal,
-    }).then((response) => {
-        if (!response.ok) {
-            throw new Error('Falha ao sincronizar localização da TX');
-        }
-        return response.json();
-    }).then((data) => {
-        if (!state.txData) {
-            state.txData = {};
-        }
-        if (data.municipality !== undefined) {
-            state.txData.txLocationName = data.municipality;
-        }
-        if (data.elevation !== undefined) {
-            state.txData.txElevation = data.elevation;
-        }
-        updateTxSummary(state.txData);
-    }).catch((error) => {
-        if (error.name === 'AbortError') {
-            return;
-        }
-        console.error(error);
-    }).finally(() => {
-        txLocationAbortController = null;
-    });
-}
-
-function updateLossSummary(components, centerMetrics) {
-    const summaries = components || {};
-    const container = document.getElementById('lossSummary');
-    if (!container) return;
-
-    const keys = ['L_b0p', 'L_bd', 'L_bs', 'L_ba', 'L_b', 'L_b_corr'];
-    keys.forEach((key) => {
-        const el = document.getElementById(`loss-${key}`);
-        if (!el) return;
-        const item = summaries[key];
-        if (!item) {
-            el.textContent = '-';
-            return;
-        }
-        const center = formatDbValue(item.center);
-        if (item.min !== undefined && item.max !== undefined) {
-            el.textContent = `${center} (${formatDbValue(item.min)} – ${formatDbValue(item.max)})`;
-        } else {
-            el.textContent = center;
-        }
-    });
-
-    const pathInfo = document.getElementById('pathTypeInfo');
-    if (pathInfo) {
-        if (centerMetrics && centerMetrics.path_type) {
-            const pathType = (centerMetrics.path_type || '').toString().toUpperCase();
-            const lookup = {
-                LOS: 'Trajeto predominante em linha de visada (LOS).',
-                NLOS: 'Trajeto trans-horizonte com múltiplos mecanismos.',
-                DIFFRACTION: 'Perdas dominadas por difração sobre o relevo.',
-                TROPOSCATTER: 'Predomínio de espalhamento troposférico.',
-            };
-            pathInfo.textContent = lookup[pathType] || centerMetrics.path_type;
-        } else {
-            pathInfo.textContent = '';
-        }
-    }
-}
-
-function updateCenterMetrics(metrics) {
-    const data = metrics || {};
-    const setText = (id, value) => {
-        const el = document.getElementById(id);
-        if (el) {
-            el.textContent = value;
-        }
-    };
-
-    setText('centerLoss', formatDbValue(data.combined_loss_center_db));
-    setText('centerPower', formatDbValue(data.received_power_center_dbm, 'dBm'));
-    setText('centerField', formatDbValue(data.field_center_dbuv_m, 'dBµV/m'));
-    setText('centerGain', formatDbValue(data.effective_gain_center_db));
-    if (data.distance_center_km !== undefined && data.distance_center_km !== null) {
-        setText('centerDistance', formatNumber(data.distance_center_km, ' km'));
-    } else {
-        setText('centerDistance', '-');
-    }
-    const pathEl = document.getElementById('centerPath');
-    if (pathEl) {
-        if (!data.path_type) {
-            pathEl.textContent = '-';
-        } else {
-            const pathType = (data.path_type || '').toString().toUpperCase();
-            const labelMap = {
-                LOS: 'Linha de visada (LOS)',
-                NLOS: 'Trans-horizonte (NLOS)',
-                DIFFRACTION: 'Difração predominante',
-                TROPOSCATTER: 'Espalhamento troposférico',
-            };
-            pathEl.textContent = labelMap[pathType] || data.path_type;
-        }
     }
 }
 
@@ -478,57 +209,78 @@ function clearCoverageOverlay() {
     }
 }
 
-function applyCoverageOverlay(unitKey = state.coverageUnit || 'dbuv') {
-    if (!state.coverageData || !state.map) return;
-    const response = state.coverageData;
-    const images = response.images || {
-        dbuv: {
-            image: response.image || null,
-            colorbar: response.colorbar || null,
-            label: 'Campo elétrico [dBµV/m]',
-            unit: 'dBµV/m',
-        },
-    };
-
-    const entry = images[unitKey] || images.dbuv;
-    if (!entry || !entry.image) return;
-
+function applyCoverageOverlay(response) {
     clearCoverageOverlay();
-    const bounds = response.bounds;
-    if (!bounds) return;
 
+    const bounds = response.bounds;
+    if (!bounds || !state.map) return;
+
+    // Seleciona imagem e colorbar na unidade preferida
+    let overlayImage = response.image || null;
+    let colorbarImage = response.colorbar || null;
+
+    if (!overlayImage && response.images) {
+        const availableUnits = Object.keys(response.images);
+
+        let preferredUnit = state.coverageUnit && response.images[state.coverageUnit]
+            ? state.coverageUnit
+            : null;
+
+        if (!preferredUnit && response.scale?.default_unit && response.images[response.scale.default_unit]) {
+            preferredUnit = response.scale.default_unit;
+        }
+
+        if (!preferredUnit) {
+            preferredUnit = availableUnits[0];
+        }
+
+        const unitPayload = response.images[preferredUnit];
+        if (unitPayload) {
+            overlayImage = unitPayload.image;
+            colorbarImage = unitPayload.colorbar;
+            state.coverageUnit = preferredUnit;
+        }
+    }
+
+    if (!overlayImage) {
+        console.warn('Resposta sem imagem de cobertura disponível.', response);
+        return;
+    }
+
+    // Bounds do overlay de calor
     const overlayBounds = new google.maps.LatLngBounds(
         new google.maps.LatLng(bounds.south, bounds.west),
         new google.maps.LatLng(bounds.north, bounds.east)
     );
 
-    const OverlayClass = ensureCoverageOverlayClass();
-    const overlay = new OverlayClass(
+    // Cria o GroundOverlay (heatmap)
+    const overlay = new google.maps.GroundOverlay(
+        `data:image/png;base64,${overlayImage}`,
         overlayBounds,
-        `data:image/png;base64,${entry.image}`,
-        state.overlayOpacity
+        { opacity: state.overlayOpacity }
     );
     overlay.setMap(state.map);
     state.coverageOverlay = overlay;
-    state.coverageUnit = unitKey;
 
-    const card = document.getElementById('colorbarCard');
-    const img = document.getElementById('colorbarImage');
-    const labelEl = document.getElementById('colorbarLabel');
-    if (card && img) {
-        if (entry.colorbar) {
-            img.src = `data:image/png;base64,${entry.colorbar}`;
-            card.hidden = false;
-        } else {
-            card.hidden = true;
-        }
-    }
-    if (labelEl && entry.label) {
-        labelEl.textContent = entry.label;
+    // >>> NOVO: clique no overlay também cria RX <<<
+    overlay.addListener('click', (event) => {
+        if (!event || !event.latLng) return;
+        if (!state.txCoords) return;
+        createRxMarker(event.latLng);
+    });
+
+    // Colorbar lateral
+    if (colorbarImage) {
+        const card = document.getElementById('colorbarCard');
+        const img = document.getElementById('colorbarImage');
+        img.src = `data:image/png;base64,${colorbarImage}`;
+        card.hidden = false;
     }
 
+    // Desenha o círculo de raio (apenas visual)
     if (response.requested_radius_km && response.center) {
         const centerLatLng = new google.maps.LatLng(response.center.lat, response.center.lng);
+
         state.radiusCircle = new google.maps.Circle({
             map: state.map,
             center: centerLatLng,
@@ -538,12 +290,11 @@ function applyCoverageOverlay(unitKey = state.coverageUnit || 'dbuv') {
             strokeWeight: 2,
             fillColor: '#0d6efd',
             fillOpacity: 0.1,
-            clickable: false,
+            clickable: false, // <<< não intercepta clique
         });
-        state.coverageRadiusKm = Number(response.requested_radius_km) || null;
-    } else {
-        state.coverageRadiusKm = null;
     }
+
+    refreshDirectionGuide();
 }
 
 function setOverlayOpacity(value) {
@@ -573,13 +324,8 @@ function findNearestFieldStrength(lat, lng, dict) {
 function updateLinkSummary(summary) {
     document.getElementById('linkDistance').textContent = summary.distance || '-';
     document.getElementById('linkBearing').textContent = summary.bearing || '-';
-    document.getElementById('linkField').textContent = formatFieldValue(summary);
-
-    let elevationText = summary.elevation || '-';
-    if (summary.obstacles && summary.obstacles !== '-' && summary.obstacles !== 'Nenhum') {
-        elevationText = `${elevationText} | Obst.: ${summary.obstacles}`;
-    }
-    document.getElementById('linkElevation').textContent = elevationText;
+    document.getElementById('linkField').textContent = summary.field || '-';
+    document.getElementById('linkElevation').textContent = summary.elevation || '-';
 }
 
 function highlightRxEntry(index) {
@@ -591,6 +337,7 @@ function highlightRxEntry(index) {
 function updateLinkVisuals(entry) {
     if (state.linkLine) {
         state.linkLine.setMap(null);
+        state.linkLine = null;
     }
     state.linkLine = new google.maps.Polyline({
         map: state.map,
@@ -630,10 +377,12 @@ function clearReceivers() {
     state.rxEntries.forEach((entry) => entry.marker.setMap(null));
     state.rxEntries = [];
     state.selectedRxIndex = null;
+
     if (state.linkLine) {
         state.linkLine.setMap(null);
         state.linkLine = null;
     }
+
     updateLinkSummary({});
     renderRxList();
     document.getElementById('btnGenerateProfile').disabled = true;
@@ -642,6 +391,7 @@ function clearReceivers() {
 function renderRxList() {
     const container = document.getElementById('rxList');
     container.innerHTML = '';
+
     if (!state.rxEntries.length) {
         container.innerHTML = '<li class="rx-empty">Nenhum ponto RX selecionado.</li>';
         return;
@@ -650,6 +400,7 @@ function renderRxList() {
     state.rxEntries.forEach((entry, idx) => {
         const li = document.createElement('li');
         li.className = `rx-item${idx === state.selectedRxIndex ? ' selected' : ''}`;
+
         const title = document.createElement('div');
         title.className = 'rx-title';
         title.textContent = `RX ${idx + 1}`;
@@ -659,19 +410,18 @@ function renderRxList() {
         const summary = entry.summary || {};
         details.innerHTML = `
             <span>${summary.distance || '-'}</span>
-            <span>${formatFieldValue(summary)}</span>
-            <span>${summary.obstacles || '-'}</span>
+            <span>${summary.field || '-'}</span>
             <span>${summary.elevation || '-'}</span>
         `;
 
         const actions = document.createElement('div');
         actions.className = 'rx-actions';
+
         const focusBtn = document.createElement('button');
         focusBtn.type = 'button';
         focusBtn.textContent = 'Focar';
         focusBtn.className = 'btn btn-sm btn-outline-primary';
-        focusBtn.onclick = (event) => {
-            event.stopPropagation();
+        focusBtn.onclick = () => {
             state.map.panTo(entry.marker.getPosition());
             state.map.setZoom(Math.max(state.map.getZoom(), 11));
             selectRx(idx);
@@ -681,37 +431,25 @@ function renderRxList() {
         removeBtn.type = 'button';
         removeBtn.textContent = 'Remover';
         removeBtn.className = 'btn btn-sm btn-link text-danger';
-        removeBtn.onclick = (event) => {
-            event.stopPropagation();
-            removeRx(idx);
-        };
-
-        const profileBtn = document.createElement('button');
-        profileBtn.type = 'button';
-        profileBtn.textContent = 'Perfil';
-        profileBtn.className = 'btn btn-sm btn-outline-success';
-        profileBtn.onclick = (event) => {
-            event.stopPropagation();
-            selectRx(idx);
-            generateProfile();
-        };
+        removeBtn.onclick = () => removeRx(idx);
 
         actions.appendChild(focusBtn);
-        actions.appendChild(profileBtn);
         actions.appendChild(removeBtn);
 
         li.appendChild(title);
         li.appendChild(details);
         li.appendChild(actions);
+
         li.onclick = (event) => {
-            if (event.target === removeBtn || event.target === focusBtn || event.target === profileBtn) return;
+            if (event.target === removeBtn || event.target === focusBtn) return;
             selectRx(idx);
         };
+
         container.appendChild(li);
     });
 }
 
-function getElevation(position) {
+function ensureElevationServiceAndGet(position) {
     ensureElevationService();
     return new Promise((resolve) => {
         state.elevationService.getElevationForLocations({ locations: [position] }, (results, status) => {
@@ -727,57 +465,29 @@ function getElevation(position) {
 function computeReceiverSummary(position) {
     const distanceMeters = google.maps.geometry.spherical.computeDistanceBetween(state.txCoords, position);
     const bearing = google.maps.geometry.spherical.computeHeading(state.txCoords, position);
+
     const summary = {
         distance: `${(distanceMeters / 1000).toFixed(2)} km`,
         bearing: `${bearing.toFixed(1)}°`,
     };
 
-    const radiusLimitMeters = state.coverageRadiusKm ? state.coverageRadiusKm * 1000 : null;
-    const insideCoverage = radiusLimitMeters === null || distanceMeters <= radiusLimitMeters + 20;
-    summary.insideCoverage = insideCoverage;
-    summary.field_dbuv = undefined;
-    summary.field_dbm = undefined;
-    summary.obstacles = summary.obstacles || '-';
-
-    const dictDbuv = state.signalLevelDict?.dbuv || {};
-    const dictDbm = state.signalLevelDict?.dbm || {};
-
-    if (insideCoverage) {
-        const fieldDbuv = findNearestFieldStrength(position.lat(), position.lng(), dictDbuv);
-        if (fieldDbuv !== null && fieldDbuv !== undefined) {
-            summary.field_dbuv = Number(fieldDbuv);
-        }
-        const fieldDbm = findNearestFieldStrength(position.lat(), position.lng(), dictDbm);
-        if (fieldDbm !== null && fieldDbm !== undefined) {
-            summary.field_dbm = Number(fieldDbm);
+    if (state.coverageData && state.coverageData.signal_level_dict) {
+        const field = findNearestFieldStrength(
+            position.lat(),
+            position.lng(),
+            state.coverageData.signal_level_dict
+        );
+        if (field !== null) {
+            summary.field = `${field.toFixed(1)} dBµV/m`;
         }
     }
-    summary.pendingField = insideCoverage && summary.field_dbuv === undefined && summary.field_dbm === undefined;
 
-    return getElevation(position).then((elevation) => {
+    return ensureElevationServiceAndGet(position).then((elevation) => {
         if (elevation !== null) {
             summary.elevation = `${elevation.toFixed(1)} m`;
         }
         return summary;
     });
-}
-
-function formatFieldValue(summary) {
-    if (!summary) return '-';
-    const unitKey = state.coverageUnit || 'dbuv';
-    if (unitKey === 'dbm') {
-        if (summary.field_dbm !== undefined) {
-            return `${summary.field_dbm.toFixed(1)} dBm`;
-        }
-    } else {
-        if (summary.field_dbuv !== undefined) {
-            return `${summary.field_dbuv.toFixed(1)} dBµV/m`;
-        }
-    }
-    if (summary.insideCoverage === false) {
-        return 'Fora da área';
-    }
-    return summary.pendingField ? 'Em cálculo' : '-';
 }
 
 function createRxMarker(position) {
@@ -819,14 +529,15 @@ function createRxMarker(position) {
     });
 
     state.rxEntries.push(entry);
+
     computeReceiverSummary(position).then((summary) => {
         entry.summary = summary;
-        entry.pendingField = summary.pendingField;
         if (state.selectedRxIndex === state.rxEntries.indexOf(entry)) {
             updateLinkSummary(summary);
         }
         renderRxList();
     });
+
     renderRxList();
     selectRx(state.rxEntries.length - 1);
 }
@@ -837,27 +548,22 @@ function handleMapClick(event) {
 }
 
 function setTxCoords(latLng, { pan = false } = {}) {
-    const prevCoords = state.txCoords
-        ? new google.maps.LatLng(state.txCoords.lat(), state.txCoords.lng())
-        : null;
     state.txCoords = latLng;
+
     if (state.txMarker) {
         state.txMarker.setPosition(latLng);
     }
+
     if (pan) {
         state.map.panTo(latLng);
     }
+
     if (state.txData) {
         state.txData.latitude = latLng.lat();
         state.txData.longitude = latLng.lng();
         updateTxSummary(state.txData);
     }
-    const distanceChanged = prevCoords
-        ? google.maps.geometry.spherical.computeDistanceBetween(prevCoords, latLng)
-        : Number.POSITIVE_INFINITY;
-    if (!prevCoords || distanceChanged > 0.5) {
-        syncTxLocation(latLng);
-    }
+
     state.rxEntries.forEach((entry, idx) => {
         if (entry.summary) {
             computeReceiverSummary(entry.marker.getPosition()).then((summary) => {
@@ -869,44 +575,101 @@ function setTxCoords(latLng, { pan = false } = {}) {
             });
         }
     });
+
+    refreshDirectionGuide();
 }
 
 function handleTxDragEnd(event) {
     const position = event.latLng;
     setTxCoords(position, { pan: false });
     showToast('Posição da TX atualizada. Gere a cobertura novamente.', false);
-    markCoverageStale('Posição da TX alterada. Gere a cobertura novamente.');
 }
 
 function saveTilt(value) {
     if (state.pendingTiltTimeout) {
         clearTimeout(state.pendingTiltTimeout);
     }
+
     state.pendingTiltTimeout = setTimeout(() => {
         fetch('/update-tilt', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ tilt: value }),
-        }).then((response) => {
+        })
+        .then((response) => {
             if (!response.ok) {
-                throw new Error('Falha ao atualizar tilt');
+                return response.json().catch(() => ({})).then((payload) => {
+                    throw new Error(payload.error || 'Falha ao atualizar tilt');
+                });
             }
             return response.json();
-        }).then(() => {
+        })
+        .then((payload) => {
+            const tiltValue = Number(payload?.antennaTilt ?? value);
             if (state.txData) {
-                state.txData.antennaTilt = Number(value);
+                state.txData.antennaTilt = tiltValue;
             }
-            showToast('Tilt atualizado. Gere a cobertura novamente.');
-            markCoverageStale('Tilt alterado. Gere a cobertura novamente.');
-        }).catch((error) => {
+            updateTiltLabel(tiltValue);
+            showToast('Tilt atualizado');
+        })
+        .catch((error) => {
             console.error(error);
             showToast('Erro ao atualizar tilt', true);
         });
     }, 350);
 }
 
+function saveDirection(value) {
+    if (state.pendingDirectionTimeout) {
+        clearTimeout(state.pendingDirectionTimeout);
+    }
+
+    const normalized = normalizeAzimuth(value);
+
+    state.pendingDirectionTimeout = setTimeout(() => {
+        fetch('/update-tilt', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ direction: normalized }),
+        })
+        .then((response) => {
+            if (!response.ok) {
+                return response.json().catch(() => ({})).then((payload) => {
+                    throw new Error(payload.error || 'Falha ao atualizar azimute');
+                });
+            }
+            return response.json();
+        })
+        .then((payload) => {
+            const directionValue = normalizeAzimuth(payload?.antennaDirection ?? normalized);
+
+            if (state.txData) {
+                state.txData.antennaDirection = directionValue;
+                updateTxSummary(state.txData);
+            } else {
+                updateDirectionLabel(directionValue);
+                const directionDisplay = document.getElementById('txDirection');
+                if (directionDisplay) {
+                    directionDisplay.textContent = formatAzimuth(directionValue);
+                }
+            }
+
+            showToast('Azimute atualizado');
+            refreshDirectionGuide();
+        })
+        .catch((error) => {
+            console.error(error);
+            showToast('Erro ao atualizar azimute', true);
+        });
+    }, 350);
+}
+
 function generateCoverage() {
-    if (!state.txCoords) return;
+    if (!state.txCoords) {
+        showToast('Defina a posição da TX antes de gerar a cobertura', true);
+        return;
+    }
+
     const radiusKm = Number(document.getElementById('radiusInput').value) || 0;
     const minField = document.getElementById('minField').value;
     const maxField = document.getElementById('maxField').value;
@@ -924,70 +687,51 @@ function generateCoverage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
-    }).then((response) => {
+    })
+    .then((response) => {
         if (!response.ok) {
-            throw new Error('Falha ao gerar cobertura');
+            return response.json()
+                .catch(() => ({}))
+                .then((errorPayload) => {
+                    const message = errorPayload?.error || errorPayload?.message || 'Falha ao gerar cobertura';
+                    throw new Error(message);
+                });
         }
         return response.json();
-    }).then((data) => {
+    })
+    .then((data) => {
         state.coverageData = data;
-        state.coverageRadiusKm = Number(data.requested_radius_km) || null;
-        state.signalLevelDict = {
-            dbuv: data.signal_level_dict || {},
-            dbm: data.signal_level_dict_dbm || {},
-        };
-        state.lossComponents = data.loss_components || null;
-        state.centerMetrics = data.center_metrics || null;
-
-        if (!state.txData) {
-            state.txData = {};
-        }
-        if (data.tx_location_name !== undefined) {
-            state.txData.txLocationName = data.tx_location_name;
-        }
-        if (data.tx_site_elevation !== undefined) {
-            state.txData.txElevation = data.tx_site_elevation;
-        }
-        if (data.climate_updated_at) {
-            state.txData.climateUpdatedAt = data.climate_updated_at;
-        }
 
         if (data.center) {
             const centerLatLng = new google.maps.LatLng(data.center.lat, data.center.lng);
             setTxCoords(centerLatLng, { pan: false });
-        } else {
-            updateTxSummary(state.txData);
         }
 
-        const defaultUnit = (data.scale && data.scale.default_unit) || 'dbuv';
-        state.coverageUnit = defaultUnit;
-        setCoverageUnit(defaultUnit);
-        updateGainSummary(data.gain_components || null);
-        updateLossSummary(state.lossComponents, state.centerMetrics);
-        updateCenterMetrics(state.centerMetrics);
+        if (data.antenna_direction !== undefined && data.antenna_direction !== null) {
+            const normalizedDirection = normalizeAzimuth(data.antenna_direction);
 
-        if (data.location_status) {
-            setCoverageStatus(data.location_status);
-        } else {
-            clearCoverageStatus();
-        }
-
-        const recomputePromises = state.rxEntries.map((entry, idx) =>
-            computeReceiverSummary(entry.marker.getPosition()).then((summary) => {
-                entry.summary = summary;
-                if (idx === state.selectedRxIndex) {
-                    updateLinkSummary(summary);
+            if (state.txData) {
+                state.txData.antennaDirection = normalizedDirection;
+                updateTxSummary(state.txData);
+            } else {
+                updateDirectionLabel(normalizedDirection);
+                const directionDisplay = document.getElementById('txDirection');
+                if (directionDisplay) {
+                    directionDisplay.textContent = formatAzimuth(normalizedDirection);
                 }
-            })
-        );
-        Promise.all(recomputePromises).finally(() => {
-            renderRxList();
-        });
+            }
+        }
+
+        applyCoverageOverlay(data);
+        updateGainSummary(data.gain_components, data.scale);
         showToast('Cobertura atualizada com sucesso');
-    }).catch((error) => {
+    })
+    .catch((error) => {
         console.error(error);
-        showToast('Não foi possível gerar a cobertura', true);
-    }).finally(() => {
+        const message = (error && error.message) ? error.message : 'Não foi possível gerar a cobertura';
+        showToast(message, true);
+    })
+    .finally(() => {
         setCoverageLoading(false);
     });
 }
@@ -997,11 +741,13 @@ function generateProfile() {
         showToast('Selecione um RX na lista', true);
         return;
     }
+
     const entry = state.rxEntries[state.selectedRxIndex];
     if (!entry || !state.txCoords) return;
 
     const tx = state.txCoords;
     const rx = entry.marker.getPosition();
+
     const payload = {
         path: [
             { lat: tx.lat(), lng: tx.lng() },
@@ -1013,39 +759,20 @@ function generateProfile() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
-    }).then((response) => {
+    })
+    .then((response) => {
         if (!response.ok) {
             throw new Error('Falha ao gerar perfil');
         }
         return response.json();
-    }).then((data) => {
+    })
+    .then((data) => {
         const img = document.getElementById('profileImage');
         img.src = `data:image/png;base64,${data.image}`;
-
-        if (!entry.summary) {
-            entry.summary = {};
-        }
-        if (data.field_dbuv !== undefined) {
-            entry.summary.field_dbuv = Number(data.field_dbuv);
-            entry.summary.pendingField = false;
-        }
-        if (Array.isArray(data.obstacle_distances_km)) {
-            entry.summary.obstacles = data.obstacle_distances_km.length
-                ? data.obstacle_distances_km.slice(0, 6).map((dist) => `${Number(dist).toFixed(2)} km`).join(', ')
-                : 'Nenhum';
-        }
-        if (data.received_power_dbm !== undefined) {
-            entry.summary.field_dbm = Number(data.received_power_dbm);
-        }
-        if (data.tx_gain_dbi !== undefined) {
-            entry.summary.txGain = `${Number(data.tx_gain_dbi).toFixed(2)} dBi`;
-        }
-        renderRxList();
-        updateLinkSummary(entry.summary);
-
         const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('profileModal'));
         modal.show();
-    }).catch((error) => {
+    })
+    .catch((error) => {
         console.error(error);
         showToast('Não foi possível gerar o perfil', true);
     });
@@ -1059,11 +786,13 @@ function initControls() {
 
     const overlayInput = document.getElementById('overlayOpacity');
     const overlayLabel = document.getElementById('overlayOpacityValue');
+
     overlayInput.addEventListener('input', (event) => {
         const value = Number(event.target.value);
         overlayLabel.textContent = value.toFixed(2);
         setOverlayOpacity(value);
     });
+
     overlayInput.value = OVERLAY_DEFAULT_OPACITY;
     overlayLabel.textContent = OVERLAY_DEFAULT_OPACITY.toFixed(2);
 
@@ -1075,14 +804,28 @@ function initControls() {
         saveTilt(event.target.value);
     });
 
-    const unitDbuv = document.getElementById('unitDbuv');
-    if (unitDbuv) {
-        unitDbuv.addEventListener('click', () => setCoverageUnit('dbuv'));
-    }
-    const unitDbm = document.getElementById('unitDbm');
-    if (unitDbm) {
-        unitDbm.addEventListener('click', () => setCoverageUnit('dbm'));
-    }
+    const directionControl = document.getElementById('directionControl');
+    directionControl.addEventListener('input', (event) => {
+        const normalized = normalizeAzimuth(event.target.value);
+        event.target.value = normalized;
+        updateDirectionLabel(normalized);
+
+        if (state.txData) {
+            state.txData.antennaDirection = normalized;
+        }
+
+        const directionDisplay = document.getElementById('txDirection');
+        if (directionDisplay) {
+            directionDisplay.textContent = formatAzimuth(normalized);
+        }
+
+        refreshDirectionGuide();
+    });
+    directionControl.addEventListener('change', (event) => {
+        const normalized = normalizeAzimuth(event.target.value);
+        event.target.value = normalized;
+        saveDirection(normalized);
+    });
 
     updateRadiusLabel();
 }
@@ -1092,8 +835,10 @@ function initCoverageMap() {
         .then((response) => response.json())
         .then((data) => {
             state.txData = { ...data };
+
             const txLatLng = new google.maps.LatLng(data.latitude, data.longitude);
             state.txCoords = txLatLng;
+
             updateTxSummary(data);
 
             state.map = new google.maps.Map(document.getElementById('coverageMap'), {
@@ -1112,12 +857,14 @@ function initCoverageMap() {
                     url: 'https://maps.gstatic.com/mapfiles/ms2/micons/red-dot.png',
                 },
             });
+
             state.txMarker.addListener('dragend', handleTxDragEnd);
 
+            // Clique direto no mapa (fora do overlay) ainda cria RX
             state.map.addListener('click', handleMapClick);
 
             initControls();
-            updateUnitButtons(state.coverageUnit || 'dbuv');
+            refreshDirectionGuide();
             ensureElevationService();
         })
         .catch((error) => {

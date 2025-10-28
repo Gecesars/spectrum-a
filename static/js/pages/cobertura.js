@@ -50,23 +50,46 @@
                     userName.textContent = data.nomeUsuario;
                 }
             }
-            const polSelect = document.getElementById('polarization');
-            if (polSelect) {
-                polSelect.value = (data.polarization || 'vertical').toLowerCase();
-            }
-            const versionSelect = document.getElementById('p452Version');
-            if (versionSelect) {
-                versionSelect.value = data.p452Version || '16';
-            }
-            if (data.timePercentage === undefined || data.timePercentage === null) {
-                const timeField = document.getElementById('timePercentage');
-                if (timeField) {
-                    timeField.value = 40;
-                }
-            }
-            atualizarResumoLocalDados(data);
         } catch (error) {
             console.error(error);
+        }
+    }
+
+    async function carregarClimaPadrao() {
+        const statusEl = document.getElementById('climateStatus');
+        const button = document.getElementById('loadClimateBtn');
+        if (!statusEl || !button) {
+            return;
+        }
+        statusEl.hidden = false;
+        statusEl.textContent = 'Consultando séries históricas (últimos 360 dias)...';
+        button.disabled = true;
+        try {
+            const response = await fetch('/clima-recomendado');
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                const message = errorData.error || 'Não foi possível carregar dados climáticos.';
+                throw new Error(message);
+            }
+            const data = await response.json();
+            if (data.temperature !== undefined) {
+                const temperatureField = document.getElementById('temperature');
+                if (temperatureField) temperatureField.value = data.temperature;
+            }
+            if (data.pressure !== undefined) {
+                const pressureField = document.getElementById('pressure');
+                if (pressureField) pressureField.value = data.pressure;
+            }
+            if (data.waterDensity !== undefined) {
+                const waterDensityField = document.getElementById('waterDensity');
+                if (waterDensityField) waterDensityField.value = data.waterDensity;
+            }
+            statusEl.textContent = `Clima atualizado${data.municipality ? ` para ${data.municipality}` : ''}. Amostra de ${data.daysSampled || 0} dias.`;
+        } catch (error) {
+            console.error(error);
+            statusEl.textContent = error.message || 'Não foi possível carregar dados climáticos.';
+        } finally {
+            button.disabled = false;
         }
     }
 
@@ -104,47 +127,6 @@
         document.getElementById(decimalFieldId).value = (decimalValue * direction).toFixed(6);
     }
 
-    function atualizarResumoLocalDados(data) {
-        const municipioEl = document.getElementById('txLocationName');
-        if (municipioEl) {
-            municipioEl.textContent = data.txLocationName || data.municipality || '-';
-        }
-        const elevationEl = document.getElementById('txElevation');
-        if (elevationEl) {
-            const valor = data.txElevation ?? data.elevation;
-            elevationEl.textContent = valor !== undefined && valor !== null
-                ? `${Number(valor).toFixed(1)} m`
-                : '-';
-        }
-        const climateEl = document.getElementById('climateStatus');
-        if (climateEl) {
-            if (data.climateUpdatedAt) {
-                const date = new Date(data.climateUpdatedAt);
-                climateEl.hidden = false;
-                climateEl.innerHTML = `Clima ajustado em ${date.toLocaleString('pt-BR', { timeZone: 'UTC' })} UTC.`;
-            } else if (!climateEl.textContent) {
-                climateEl.hidden = true;
-            }
-        }
-    }
-
-    async function atualizarLocalizacaoTx(lat, lng) {
-        try {
-            const response = await fetch('/tx-location', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ latitude: lat, longitude: lng }),
-            });
-            if (!response.ok) {
-                throw new Error('Falha ao atualizar localização');
-            }
-            const data = await response.json();
-            atualizarResumoLocalDados(data);
-        } catch (error) {
-            console.error(error);
-        }
-    }
-
     function placeMarkerAndPanTo(latLng) {
         if (marker) {
             marker.setMap(null);
@@ -163,8 +145,6 @@
         if (coverageButton) {
             coverageButton.disabled = false;
         }
-
-        atualizarLocalizacaoTx(latitude, longitude);
     }
 
     function saveCoordinates() {
@@ -180,8 +160,6 @@
             coverageButton.disabled = false;
         }
         modals.map?.hide();
-
-        atualizarLocalizacaoTx(latitude, longitude);
     }
 
     function saveManualCoordinates() {
@@ -199,7 +177,6 @@
                 coverageButton.disabled = false;
             }
             modals.coordinates?.hide();
-            atualizarLocalizacaoTx(latitudeDecimal, longitudeDecimal);
         } else {
             alert('Por favor, preencha todas as coordenadas.');
         }
@@ -215,49 +192,6 @@
 
     function fecharModalMapa() {
         modals.map?.hide();
-    }
-
-    async function carregarClimaAutomatico() {
-        const statusEl = document.getElementById('climateStatus');
-        if (statusEl) {
-            statusEl.hidden = false;
-            statusEl.textContent = 'Consultando Open-Meteo...';
-        }
-        try {
-            const response = await fetch('/clima-recomendado');
-            if (!response.ok) {
-                throw new Error('Falha na API');
-            }
-            const data = await response.json();
-            if (data.error) {
-                throw new Error(data.error);
-            }
-            const { temperature, pressure, waterDensity } = data;
-            const tempField = document.getElementById('temperature');
-            const pressureField = document.getElementById('pressure');
-            const waterField = document.getElementById('waterDensity');
-            if (tempField) tempField.value = Number(temperature).toFixed(1);
-            if (pressureField) pressureField.value = Number(pressure).toFixed(1);
-            if (waterField) waterField.value = Number(waterDensity).toFixed(2);
-            if (statusEl) {
-                const { relativeHumidity, daysSampled } = data;
-                const months = (daysSampled || 360) / 30;
-                statusEl.innerHTML = `Médias horárias agregadas em ${Math.round(months)} meses (≈${daysSampled || 360} dias): ` +
-                    `T = ${Number(temperature).toFixed(1)}&nbsp;°C, ` +
-                    `UR = ${Number(relativeHumidity || 0).toFixed(1)}&nbsp;%, ` +
-                    `P = ${Number(pressure).toFixed(1)}&nbsp;hPa, ` +
-                    `ρ<sub>v</sub> = ${Number(waterDensity).toFixed(2)}&nbsp;g/m³.`;
-            }
-            atualizarResumoLocalDados({
-                txLocationName: data.municipality,
-                climateUpdatedAt: data.climateUpdatedAt,
-            });
-        } catch (error) {
-            console.error(error);
-            if (statusEl) {
-                statusEl.textContent = 'Não foi possível obter dados climáticos automáticos.';
-            }
-        }
     }
 
     async function submitForm() {
@@ -296,6 +230,7 @@
             temperature: coerceNumber(formData.get('temperature')),
             pressure: coerceNumber(formData.get('pressure')),
             waterDensity: coerceNumber(formData.get('waterDensity')),
+            antennaDirection: coerceNumber(formData.get('antennaDirection')),
         };
 
         const tiltField = formData.get('antennaTilt');
@@ -379,14 +314,14 @@
             generateCoverageBtn.addEventListener('click', submitForm);
         }
 
-        const loadClimateBtn = document.getElementById('loadClimateBtn');
-        if (loadClimateBtn) {
-            loadClimateBtn.addEventListener('click', carregarClimaAutomatico);
-        }
-
         const refreshDataBtn = document.getElementById('refreshDataBtn');
         if (refreshDataBtn) {
             refreshDataBtn.addEventListener('click', carregarDadosUsuario);
+        }
+
+        const loadClimateBtn = document.getElementById('loadClimateBtn');
+        if (loadClimateBtn) {
+            loadClimateBtn.addEventListener('click', carregarClimaPadrao);
         }
 
         const backButton = document.getElementById('backToHomeBtn');
