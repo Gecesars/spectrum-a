@@ -33,6 +33,8 @@ Thumbs.db
 build/
 dist/
 
+codex/
+
 # Arquivos de configuração local
 .env
 *.bak
@@ -42,3 +44,4 @@ codex/
 __pycache__/
 __pytest_cache__/
 .cache/
+
