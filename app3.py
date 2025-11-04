@@ -6,8 +6,8 @@ app = create_app()
 
 
 def configure_runtime():
-    os.environ.setdefault('OMP_NUM_THREADS', '2')
-    os.environ.setdefault('OPENBLAS_NUM_THREADS', '2')
+    os.environ.setdefault('OMP_NUM_THREADS', '20')
+    os.environ.setdefault('OPENBLAS_NUM_THREADS', '20')
 
 
 if __name__ == '__main__':
