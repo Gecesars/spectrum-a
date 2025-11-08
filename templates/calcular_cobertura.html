@@ -173,6 +173,75 @@
                         </div>
                     </div>
                 </article>
+                <article class="coverage-card engine-panel" data-engine-panel="rt3d">
+                    <h3 class="mb-3 d-flex align-items-center gap-2">
+                        Ray Tracing 3D
+                        <span class="badge bg-brand text-uppercase">Beta</span>
+                    </h3>
+                    <p class="text-muted mb-3">
+                        Esses controles definem como a malha urbana Google/OSM é amostrada e como o solver aplica reflexões,
+                        difrações e perdas por canhão urbano. Utilize valores maiores apenas quando necessário (processamento intenso).
+                    </p>
+                    <div class="form-grid">
+                        <div>
+                            <label for="rt3dUrbanRadius" class="form-label" data-bs-toggle="tooltip" title="Raio usado para baixar a malha urbana e gerar a cena RT3D. Valores maiores implicam em mais edifícios e tempo de processamento.">Raio da cena (km)</label>
+                            <input type="number" step="0.1" min="0.5" max="15" class="form-control" id="rt3dUrbanRadius" value="{{ project_settings.get('rt3dUrbanRadius') or 3 }}">
+                        </div>
+                        <div>
+                            <label for="rt3dRays" class="form-label" data-bs-toggle="tooltip" title="Número de raios/amostras disparados ao redor da TX para modelar reflexões. Impacta diretamente no custo.">Raios por anel</label>
+                            <input type="number" step="1" min="12" max="96" class="form-control" id="rt3dRays" value="{{ project_settings.get('rt3dRays') or 48 }}">
+                        </div>
+                        <div>
+                            <label for="rt3dBounces" class="form-label" data-bs-toggle="tooltip" title="Quantidade máxima de reflexões simuladas para cada raio. Ainda não altera o desenho, mas é armazenado para calibração.">Reflexões máximas</label>
+                            <input type="number" step="1" min="1" max="4" class="form-control" id="rt3dBounces" value="{{ project_settings.get('rt3dBounces') or 2 }}">
+                        </div>
+                        <div>
+                            <label for="rt3dOcclusionPerMeter" class="form-label" data-bs-toggle="tooltip" title="Fator aplicado (dB por metro) quando a TX fica abaixo das edificações. Valores altos reduzem drasticamente a mancha em canyons.">Penalidade de oclusão (dB/m)</label>
+                            <input type="number" step="0.05" min="0" max="3" class="form-control" id="rt3dOcclusionPerMeter" value="{{ project_settings.get('rt3dOcclusionPerMeter') or 0.8 }}">
+                        </div>
+                        <div>
+                            <label for="rt3dReflectionGain" class="form-label" data-bs-toggle="tooltip" title="Ganho máximo concedido quando há reflexões úteis em fachadas altas. Use valores baixos para ambientes ruidosos.">Ganho por reflexão (dB/m)</label>
+                            <input type="number" step="0.05" min="0" max="2" class="form-control" id="rt3dReflectionGain" value="{{ project_settings.get('rt3dReflectionGain') or 0.35 }}">
+                        </div>
+                        <div>
+                            <label for="rt3dInterferencePenalty" class="form-label" data-bs-toggle="tooltip" title="Penalidade aplicada em regiões com forte variação de alturas (multi-caminho severo).">Penalidade de interferência</label>
+                            <input type="number" step="0.05" min="0" max="2" class="form-control" id="rt3dInterferencePenalty" value="{{ project_settings.get('rt3dInterferencePenalty') or 0.25 }}">
+                        </div>
+                        <div>
+                            <label for="rt3dSamples" class="form-label" data-bs-toggle="tooltip" title="Número de amostras solicitadas à API de elevação quando o fallback determinístico for necessário.">Amostras fallback</label>
+                            <input type="number" step="16" min="96" max="640" class="form-control" id="rt3dSamples" value="{{ project_settings.get('rt3dSamples') or 240 }}">
+                        </div>
+                        <div>
+                            <label for="rt3dRings" class="form-label" data-bs-toggle="tooltip" title="Divide o raio urbano em anéis; cada anel dispara todos os raios configurados. Usado apenas no fallback de elevação.">Anéis fallback</label>
+                            <input type="number" step="1" min="3" max="10" class="form-control" id="rt3dRings" value="{{ project_settings.get('rt3dRings') or 6 }}">
+                        </div>
+                    </div>
+                </article>
+                <article class="coverage-card engine-panel" data-engine-panel="rt3d">
+                    <h3 class="mb-3">Parâmetros geométricos</h3>
+                    <div class="form-grid">
+                        <div>
+                            <label for="rt3dBuildingSource" class="form-label" data-bs-toggle="tooltip" title="Controla a fonte prioritária para malhas urbanas. ‘Google Photorealistic’ usa os blocos 3D oficiais (quando habilitado), já ‘OSM/Overpass’ usa footprints OpenStreetMap.">Fonte de edificações</label>
+                            <select id="rt3dBuildingSource" class="form-select">
+                                <option value="google" {% if project_settings.get('rt3dBuildingSource') == 'google' %}selected{% endif %}>Google Photorealistic 3D</option>
+                                <option value="osm" {% if project_settings.get('rt3dBuildingSource') == 'osm' %}selected{% endif %}>OSM / Overpass</option>
+                                <option value="auto" {% if project_settings.get('rt3dBuildingSource') == 'auto' or project_settings.get('rt3dBuildingSource') is none %}selected{% endif %}>Automático</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="rt3dRayStep" class="form-label" data-bs-toggle="tooltip" title="Resolução espacial usada para amostrar cada raio (em metros). Valores menores aumentam a precisão e o custo.">Passo do raio (m)</label>
+                            <input type="number" step="1" min="5" max="200" class="form-control" id="rt3dRayStep" value="{{ project_settings.get('rt3dRayStep') or 25 }}">
+                        </div>
+                        <div>
+                            <label for="rt3dDiffractionBoost" class="form-label" data-bs-toggle="tooltip" title="Fator em dB aplicado a raios que passam por difração de telhados/quinas. Útil para cenários com cobertura marginal.">Compensação de difração (dB)</label>
+                            <input type="number" step="0.5" min="0" max="10" class="form-control" id="rt3dDiffractionBoost" value="{{ project_settings.get('rt3dDiffractionBoost') or 1.5 }}">
+                        </div>
+                        <div>
+                            <label for="rt3dMinimumClearance" class="form-label" data-bs-toggle="tooltip" title="Altura mínima (em metros) que o transmissor precisa estar acima da edificação mais próxima para ser considerado LOS. Valores menores favorecem reflexões.">Clearance mínimo (m)</label>
+                            <input type="number" step="0.5" min="0" max="15" class="form-control" id="rt3dMinimumClearance" value="{{ project_settings.get('rt3dMinimumClearance') or 2 }}">
+                        </div>
+                    </div>
+                </article>
                 <article class="coverage-card">
                     <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-3">
                         <h3 class="mb-0">Posicionamento da Estação</h3>

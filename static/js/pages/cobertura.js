@@ -49,6 +49,8 @@
         state.engine = 'p1546';
     }
 
+    toggleEnginePanels(state.engine);
+
     const modals = {};
     let map;
     let marker;
@@ -113,6 +115,16 @@
         }
     }
 
+    function toggleEnginePanels(engine) {
+        document.querySelectorAll('[data-engine-panel]').forEach((panel) => {
+            const dataValue = panel.dataset.enginePanel || '';
+            const engines = dataValue.split(',').map((val) => val.trim()).filter(Boolean);
+            const shouldShow = engines.length === 0 || engines.includes(engine);
+            panel.classList.toggle('d-none', !shouldShow);
+            panel.hidden = !shouldShow;
+        });
+    }
+
     function setEngine(engine) {
         if (!ENGINE_INFO[engine]) {
             engine = 'p1546';
@@ -132,6 +144,7 @@
         if (detailEl) {
             detailEl.textContent = info.detail;
         }
+        toggleEnginePanels(engine);
     }
 
     function updateLastSaved(value) {
@@ -345,6 +358,33 @@
         }
     }
 
+    function collectRt3dPayload() {
+        const rt3dPayload = {};
+        const mapField = (key, elementId) => {
+            const value = parseNumber(document.getElementById(elementId)?.value);
+            if (value !== null && value !== undefined && !Number.isNaN(value)) {
+                rt3dPayload[key] = value;
+            }
+        };
+        mapField('rt3dUrbanRadius', 'rt3dUrbanRadius');
+        mapField('rt3dRays', 'rt3dRays');
+        mapField('rt3dBounces', 'rt3dBounces');
+        mapField('rt3dOcclusionPerMeter', 'rt3dOcclusionPerMeter');
+        mapField('rt3dReflectionGain', 'rt3dReflectionGain');
+        mapField('rt3dInterferencePenalty', 'rt3dInterferencePenalty');
+        mapField('rt3dSamples', 'rt3dSamples');
+        mapField('rt3dRings', 'rt3dRings');
+        mapField('rt3dBuildingSource', 'rt3dBuildingSource');
+        mapField('rt3dRayStep', 'rt3dRayStep');
+        mapField('rt3dDiffractionBoost', 'rt3dDiffractionBoost');
+        mapField('rt3dMinimumClearance', 'rt3dMinimumClearance');
+        const buildingSource = document.getElementById('rt3dBuildingSource')?.value;
+        if (buildingSource) {
+            rt3dPayload.rt3dBuildingSource = buildingSource;
+        }
+        return rt3dPayload;
+    }
+
     function collectPayload() {
         const payload = {
             propagationModel: document.getElementById('propagationModel')?.value || null,
@@ -373,6 +413,10 @@
         if (coords) {
             payload.latitude = coords.lat;
             payload.longitude = coords.lon;
+        }
+
+        if (state.engine === 'rt3d' && document.getElementById('rt3dUrbanRadius')) {
+            Object.assign(payload, collectRt3dPayload());
         }
 
         return payload;
@@ -459,6 +503,14 @@
 
         notify('Gerando cobertura...', 'info', 4000);
 
+        if (state.engine === 'rt3d' && document.getElementById('rt3dUrbanRadius')) {
+            const rt3dPayload = collectRt3dPayload();
+            Object.entries(rt3dPayload).forEach(([key, value]) => {
+                const savedValue = savedPayload[key];
+                coveragePayload[key] = savedValue ?? value;
+            });
+        }
+
         try {
             const response = await fetch('/calculate-coverage', {
                 method: 'POST',
@@ -478,13 +530,18 @@
             }
 
             if (data.datasetStatus) {
-                const { demTile, lulcYear } = data.datasetStatus;
+                const { demTile, lulcYear, buildingsSource, buildingsCount } = data.datasetStatus;
                 const parts = [];
                 if (demTile) {
                     parts.push(`DEM ${demTile}`);
                 }
                 if (lulcYear) {
                     parts.push(`LULC ${lulcYear}`);
+                }
+                if (buildingsSource) {
+                    const sourceLabel = buildingsSource === 'osm-overpass' ? 'OSM/Overpass' : buildingsSource;
+                    const countLabel = buildingsCount ? ` · ${buildingsCount} feições` : '';
+                    parts.push(`RT3D ${sourceLabel}${countLabel}`);
                 }
                 if (parts.length) {
                     notify(`Dados base carregados: ${parts.join(' · ')}`, 'info', 4500);

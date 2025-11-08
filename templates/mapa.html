@@ -102,6 +102,44 @@
             <p class="assist-text">O ganho vertical é recalculado em E/Emax (θ = 0°) e o diagrama horizontal é alinhado ao azimute informado.</p>
         </div>
 
+        <div class="panel-card" id="rt3dPanel" hidden>
+            <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+                <div>
+                    <h3 class="card-title mb-1">Cenário urbano RT3D</h3>
+                    <p class="assist-text mb-0">Malha de edificações usada no motor Ray Tracing 3D.</p>
+                </div>
+                <span class="badge bg-secondary-subtle text-uppercase fw-semibold">Somente RT3D</span>
+            </div>
+            <dl class="card-grid rt3d-grid">
+                <div>
+                    <dt>Fonte</dt>
+                    <dd id="rt3dSource">-</dd>
+                </div>
+                <div>
+                    <dt>Edificações</dt>
+                    <dd id="rt3dCount">-</dd>
+                </div>
+                <div>
+                    <dt>Altura mediana</dt>
+                    <dd id="rt3dMedian">-</dd>
+                </div>
+                <div>
+                    <dt>Raio analisado</dt>
+                    <dd id="rt3dRadius">-</dd>
+                </div>
+            </dl>
+            <div class="d-flex align-items-center gap-2">
+                <button type="button" class="btn btn-outline-primary btn-sm flex-grow-1" id="toggleRt3dLayer" data-disabled-during-coverage>Ocultar malha urbana</button>
+                <button type="button" class="btn btn-outline-secondary btn-sm" id="refreshRt3dLayer" data-bs-toggle="tooltip" title="Recarrega a malha urbana usando os parâmetros atuais." data-disabled-during-coverage>Atualizar cena</button>
+                <button type="button" class="btn btn-outline-primary btn-sm" id="toggleRt3dRays" data-disabled-during-coverage>Ocultar raios</button>
+            </div>
+            <div class="d-flex align-items-center gap-2">
+                <a class="btn btn-sm btn-brand flex-grow-1" id="openRt3dViewer" target="_blank" rel="noopener">Abrir em 3D (Cesium)</a>
+                <a class="btn btn-sm btn-outline-primary" id="downloadRt3dGeojson" target="_blank" rel="noopener">Exportar GeoJSON</a>
+            </div>
+            <p class="assist-text mb-0" id="rt3dStatus">Gere a cobertura com o motor RT3D para popular este painel.</p>
+        </div>
+
         <div class="panel-card">
             <div class="d-flex justify-content-between align-items-center">
                 <h3 class="card-title mb-0">Recepções</h3>

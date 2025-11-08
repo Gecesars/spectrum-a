@@ -1,4 +1,21 @@
 const OVERLAY_DEFAULT_OPACITY = 0.85;
+const RAY_COLORS = {
+    los: '#4ade80',
+    reflection: '#fbbf24',
+    obstruction: '#fb7185',
+    profile: '#60a5fa',
+    default: '#f97316',
+};
+
+function colorFromQuality(dbValue, mode) {
+    const q = Number(dbValue);
+    if (Number.isFinite(q)) {
+        if (q >= -3) return '#22c55e';
+        if (q >= -8) return '#facc15';
+        return '#f87171';
+    }
+    return RAY_COLORS[mode] || RAY_COLORS.default;
+}
 
 const state = {
     map: null,
@@ -18,6 +35,15 @@ const state = {
     pendingDirectionTimeout: null,
     coverageUnit: 'dbuv',
     rxInfoWindow: null,
+    sceneInfoWindow: null,
+    rt3dScene: null,
+    rt3dLayer: [],
+    rt3dDiagnostics: null,
+    isRt3dLayerVisible: true,
+    rt3dRaysLayer: [],
+    isRt3dRaysVisible: true,
+    rt3dRays: null,
+    rt3dSettings: null,
 };
 
 let profileLoading = false;
@@ -328,6 +354,271 @@ function updateTxSummary(data) {
     }
 
     updateTxLegend(data);
+}
+
+function heightToColor(ratio) {
+    const clamped = Math.min(Math.max(Number(ratio) || 0, 0), 1);
+    const hue = 210 - clamped * 210; // blue -> red
+    return `hsl(${hue}, 85%, 55%)`;
+}
+
+function clearRt3dLayer() {
+    state.rt3dLayer.forEach((shape) => shape.setMap(null));
+    state.rt3dLayer = [];
+    if (state.sceneInfoWindow) {
+        state.sceneInfoWindow.close();
+    }
+}
+
+function clearRt3dRays() {
+    state.rt3dRaysLayer.forEach((line) => line.setMap(null));
+    state.rt3dRaysLayer = [];
+}
+
+function updateRt3dPanel(scene) {
+    const panel = document.getElementById('rt3dPanel');
+    if (!panel) {
+        return;
+    }
+    const toggleBtn = document.getElementById('toggleRt3dLayer');
+    const refreshBtn = document.getElementById('refreshRt3dLayer');
+    const toggleRaysBtn = document.getElementById('toggleRt3dRays');
+    const openViewerBtn = document.getElementById('openRt3dViewer');
+    const downloadGeoBtn = document.getElementById('downloadRt3dGeojson');
+    const hasScenePoints = scene && Array.isArray(scene.points) && scene.points.length > 0;
+    const hasRays = Array.isArray(state.coverageData?.rt3dRays) && state.coverageData.rt3dRays.length > 0;
+    const sceneData = hasScenePoints
+        ? scene
+        : (state.rt3dScene || state.coverageData?.rt3dScene || null);
+    const settings = state.coverageData?.rt3dSettings || null;
+
+    if (!hasScenePoints && !hasRays) {
+        panel.hidden = true;
+        if (toggleBtn) {
+            toggleBtn.disabled = true;
+            toggleBtn.textContent = 'Ocultar malha urbana';
+        }
+        if (refreshBtn) {
+            refreshBtn.disabled = false;
+        }
+        if (toggleRaysBtn) {
+            toggleRaysBtn.disabled = true;
+            toggleRaysBtn.textContent = 'Ocultar raios';
+        }
+        if (openViewerBtn) {
+            openViewerBtn.disabled = true;
+        }
+        if (downloadGeoBtn) {
+            downloadGeoBtn.disabled = true;
+        }
+        return;
+    }
+
+    panel.hidden = false;
+    const friendlySource = (settings?.building_source === 'google')
+        ? 'Google Photorealistic 3D'
+        : (settings?.building_source === 'osm')
+            ? 'OSM / Overpass'
+            : (sceneData?.source === 'osm-overpass' ? 'OSM / Overpass' : (sceneData?.source || 'Automático'));
+
+    const sourceEl = document.getElementById('rt3dSource');
+    const countEl = document.getElementById('rt3dCount');
+    const medianEl = document.getElementById('rt3dMedian');
+    const radiusEl = document.getElementById('rt3dRadius');
+    const statusEl = document.getElementById('rt3dStatus');
+
+    if (sourceEl) sourceEl.textContent = friendlySource;
+    if (countEl) {
+        const featureCount = sceneData?.feature_count
+            ?? (Array.isArray(sceneData?.points) ? sceneData.points.length : 0);
+        countEl.textContent = featureCount || '-';
+    }
+    if (medianEl) {
+        const value = Number(sceneData?.median_height);
+        medianEl.textContent = Number.isFinite(value) ? `${value.toFixed(1)} m` : '-';
+    }
+    if (radiusEl) {
+        const radiusValue = Number(sceneData?.radius_km);
+        radiusEl.textContent = Number.isFinite(radiusValue) ? `${radiusValue.toFixed(2)} km` : '-';
+    }
+    if (statusEl) {
+        const rayCount = state.coverageData?.rt3dRays?.length || sceneData?.rays?.length || 0;
+        const diagnostics = sceneData?.diagnostics || scene?.diagnostics;
+        if (diagnostics) {
+            const parts = [];
+            if (diagnostics.mode) {
+                parts.push(`Modo ${diagnostics.mode}`);
+            }
+            if (diagnostics.samples) {
+                parts.push(`${diagnostics.samples} amostras`);
+            }
+            if (rayCount) {
+                parts.push(`${rayCount} raios plotados`);
+            }
+            statusEl.textContent = parts.length
+                ? `Diagnóstico: ${parts.join(' · ')}`
+                : 'Malha processada recentemente.';
+        } else {
+            statusEl.textContent = rayCount
+                ? `Malha processada · ${rayCount} raios disponíveis`
+                : 'Malha processada recentemente.';
+        }
+        const extras = [];
+        if (friendlySource) {
+            extras.push(`Fonte: ${friendlySource}`);
+        }
+        if (settings?.ray_step_m) {
+            extras.push(`Passo do raio: ${Number(settings.ray_step_m).toFixed(1)} m`);
+        }
+        if (settings?.minimum_clearance_m) {
+            extras.push(`Clearance min: ${Number(settings.minimum_clearance_m).toFixed(1)} m`);
+        }
+        if (extras.length) {
+            statusEl.textContent = `${statusEl.textContent} · ${extras.join(' · ')}`;
+        }
+    }
+
+    if (toggleBtn) {
+        toggleBtn.disabled = state.rt3dLayer.length === 0;
+        toggleBtn.textContent = state.isRt3dLayerVisible ? 'Ocultar malha urbana' : 'Mostrar malha urbana';
+    }
+    if (refreshBtn) {
+        refreshBtn.disabled = false;
+    }
+    if (toggleRaysBtn) {
+        toggleRaysBtn.disabled = !hasRays;
+        toggleRaysBtn.textContent = state.isRt3dRaysVisible ? 'Ocultar raios' : 'Mostrar raios';
+    }
+    if (openViewerBtn) {
+        openViewerBtn.disabled = false;
+    }
+    if (downloadGeoBtn) {
+        downloadGeoBtn.disabled = false;
+    }
+}
+
+function setRt3dLayerVisibility(visible) {
+    state.isRt3dLayerVisible = Boolean(visible);
+    state.rt3dLayer.forEach((shape) => shape.setMap(state.isRt3dLayerVisible ? state.map : null));
+    updateRt3dPanel(state.rt3dScene);
+}
+
+function setRt3dRaysVisibility(visible) {
+    state.isRt3dRaysVisible = Boolean(visible);
+    state.rt3dRaysLayer.forEach((line) => line.setMap(state.isRt3dRaysVisible ? state.map : null));
+    updateRt3dPanel(state.rt3dScene);
+}
+
+function renderRt3dRays(rays) {
+    clearRt3dRays();
+    if (!state.map || !Array.isArray(rays) || !rays.length) {
+        return;
+    }
+    const MAX_RAYS = 250;
+    const effectiveRays = rays.slice(0, MAX_RAYS);
+    const infoWindow = state.sceneInfoWindow || new google.maps.InfoWindow();
+    state.sceneInfoWindow = infoWindow;
+    state.rt3dRaysLayer = effectiveRays.map((ray) => {
+        const path = Array.isArray(ray.path)
+            ? ray.path
+                .map((point) => {
+                    const lat = Number(point.lat);
+                    const lng = Number(point.lng);
+                    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+                        return null;
+                    }
+                    return new google.maps.LatLng(lat, lng);
+                })
+                .filter(Boolean)
+            : [];
+        if (path.length < 2) {
+            return null;
+        }
+        const color = colorFromQuality(ray.quality_db, ray.mode);
+        const polyline = new google.maps.Polyline({
+            map: state.isRt3dRaysVisible ? state.map : null,
+            path,
+            geodesic: true,
+            strokeColor: color,
+            strokeOpacity: 0.9,
+            strokeWeight: ray.mode === 'reflection' ? 3.5 : 2.5,
+        });
+        polyline.addListener('click', (event) => {
+            const quality = ray.quality_db !== undefined && ray.quality_db !== null
+                ? `${Number(ray.quality_db).toFixed(2)} dB`
+                : 'N/D';
+            const content = `
+                <div class="rt3d-ray-tooltip">
+                    <strong>Modo:</strong> ${ray.mode || '—'}<br>
+                    <strong>Qualidade:</strong> ${quality}<br>
+                    ${ray.height_m ? `<strong>Altura impacto:</strong> ${Number(ray.height_m).toFixed(1)} m` : ''}
+                </div>
+            `;
+            infoWindow.setContent(content);
+            infoWindow.setPosition(event.latLng || path[path.length - 1]);
+            infoWindow.open({
+                map: state.map,
+                anchor: null,
+                shouldFocus: false,
+            });
+        });
+        return polyline;
+    }).filter(Boolean);
+}
+
+function renderRt3dScene(scene) {
+    clearRt3dLayer();
+    clearRt3dRays();
+    state.rt3dScene = scene || null;
+    if (state.coverageData?.rt3dSettings) {
+        state.rt3dSettings = state.coverageData.rt3dSettings;
+    }
+    if (!scene || !state.map || !Array.isArray(scene.points) || !scene.points.length) {
+        updateRt3dPanel(null);
+        renderRt3dRays(state.coverageData?.rt3dRays || scene?.rays);
+        return;
+    }
+    const heights = scene.points
+        .map((pt) => Number(pt.height_m))
+        .filter((val) => Number.isFinite(val) && val > 0);
+    const maxHeight = Math.max(...heights, 1);
+    const MAX_RT3D_POINTS = 250;
+    let pointSet = Array.isArray(scene.points) ? scene.points.slice() : [];
+    if (pointSet.length > MAX_RT3D_POINTS) {
+        const stride = Math.ceil(pointSet.length / MAX_RT3D_POINTS);
+        pointSet = pointSet.filter((_, idx) => idx % stride === 0);
+    }
+
+    state.rt3dLayer = pointSet.map((pt) => {
+        const lat = Number(pt.lat);
+        const lon = Number(pt.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+            return null;
+        }
+        const height = Math.max(0, Number(pt.height_m) || 0);
+        const position = new google.maps.LatLng(lat, lon);
+        const circle = new google.maps.Circle({
+            center: position,
+            radius: Math.max(20, Math.min(90, 12 + height)),
+            strokeOpacity: 0,
+            fillOpacity: 0.55,
+            fillColor: heightToColor(height / maxHeight),
+            map: state.isRt3dLayerVisible ? state.map : null,
+        });
+        circle.addListener('click', () => {
+            if (!state.sceneInfoWindow) {
+                return;
+            }
+            state.sceneInfoWindow.setContent(
+                `<strong>${height.toFixed(1)} m</strong><br>Lat: ${lat.toFixed(5)}<br>Lon: ${lon.toFixed(5)}`
+            );
+            state.sceneInfoWindow.setPosition(position);
+            state.sceneInfoWindow.open({ map: state.map, anchor: null, shouldFocus: false });
+        });
+        return circle;
+    }).filter(Boolean);
+    updateRt3dPanel(scene);
+    renderRt3dRays(state.coverageData?.rt3dRays || scene?.rays);
 }
 
 function updateGainSummary(gainComponents, scale) {
@@ -759,6 +1050,10 @@ async function loadCoverageOverlay(lastCoverage) {
         signal_level_dict_dbm: summary?.signal_level_dict_dbm,
         location_status: summary?.location_status || lastCoverage.location_status,
         receivers: lastCoverage.receivers || summary?.receivers || [],
+        rt3dScene: summary?.rt3d_scene || lastCoverage.rt3d_scene || null,
+        rt3dDiagnostics: summary?.rt3d_diagnostics || lastCoverage.rt3d_diagnostics || null,
+        rt3dRays: summary?.rt3d_rays || lastCoverage.rt3d_rays || null,
+        rt3dSettings: summary?.rt3d_settings || lastCoverage.rt3d_settings || null,
     };
 
     const centerLat = parseNullableNumber(
@@ -792,6 +1087,18 @@ async function loadCoverageOverlay(lastCoverage) {
     state.coverageData.signal_level_dict = coveragePayload.signal_level_dict;
     state.coverageData.signal_level_dict_dbm = coveragePayload.signal_level_dict_dbm;
     state.coverageData.project_slug = slug;
+    state.coverageData.rt3dScene = coveragePayload.rt3dScene || summary?.rt3d_scene || lastCoverage.rt3d_scene || state.coverageData.rt3dScene || null;
+    state.coverageData.rt3dDiagnostics = coveragePayload.rt3dDiagnostics || summary?.rt3d_diagnostics || lastCoverage.rt3d_diagnostics || state.coverageData.rt3dDiagnostics || null;
+    state.coverageData.rt3dRays = coveragePayload.rt3dRays || summary?.rt3d_rays || lastCoverage.rt3d_rays || state.coverageData.rt3dRays || null;
+    state.coverageData.rt3dSettings = coveragePayload.rt3dSettings || summary?.rt3d_settings || lastCoverage.rt3d_settings || state.coverageData.rt3dSettings || null;
+    if (state.coverageData.engine !== 'rt3d') {
+        state.coverageData.rt3dScene = null;
+        state.coverageData.rt3dDiagnostics = null;
+        state.coverageData.rt3dRays = null;
+        state.coverageData.rt3dSettings = null;
+        state.isRt3dLayerVisible = true;
+        state.isRt3dRaysVisible = true;
+    }
     if (state.txData) {
         state.txData.location_status = coveragePayload.location_status || state.txData.location_status;
         if (coveragePayload.center) {
@@ -832,6 +1139,7 @@ async function loadCoverageOverlay(lastCoverage) {
     }
 
     applyCoverageOverlay(coveragePayload);
+    renderRt3dScene(state.coverageData.rt3dScene);
     updateGainSummary(coveragePayload.gain_components, coveragePayload.scale);
     updateLossSummary(coveragePayload.loss_components);
     updateCenterSummary(coveragePayload.center_metrics);
@@ -1346,13 +1654,33 @@ function confirmPersistAndGenerate(options = {}) {
             coverageState.scale = data.scale || coverageState.scale;
             coverageState.bounds = data.bounds || coverageState.bounds;
             coverageState.location_status = data.location_status || coverageState.location_status;
+            coverageState.rt3dScene = data.rt3dScene
+                || coverageState.rt3dScene
+                || data.lastCoverage?.rt3d_scene
+                || null;
+            coverageState.rt3dDiagnostics = data.rt3dDiagnostics
+                || coverageState.rt3dDiagnostics
+                || data.lastCoverage?.rt3d_diagnostics
+                || null;
+            coverageState.rt3dRays = data.rt3dRays
+                || coverageState.rt3dRays
+                || data.lastCoverage?.rt3d_rays
+                || null;
 
             coverageState.project_slug = data.project_slug || coverageState.project_slug || payload.projectSlug;
             coverageState.generated_at = data.generated_at || coverageState.generated_at;
             coverageState.engine = coverageState.engine || payload.coverageEngine;
             coverageState.receivers = serializeReceivers();
+            if (coverageState.engine !== 'rt3d') {
+                coverageState.rt3dScene = null;
+                coverageState.rt3dDiagnostics = null;
+                coverageState.rt3dRays = null;
+                state.isRt3dLayerVisible = true;
+                state.isRt3dRaysVisible = true;
+            }
 
             state.coverageData = coverageState;
+            renderRt3dScene(coverageState.rt3dScene);
 
             const centerLat = parseNullableNumber(data.center?.lat ?? data.center?.latitude);
             const centerLng = parseNullableNumber(data.center?.lng ?? data.center?.longitude);
@@ -1549,6 +1877,61 @@ function initControls() {
     });
 
     updateRadiusLabel();
+
+    const toggleRt3dButton = document.getElementById('toggleRt3dLayer');
+    if (toggleRt3dButton) {
+        toggleRt3dButton.addEventListener('click', () => {
+            if (!state.rt3dLayer.length) {
+                return;
+            }
+            setRt3dLayerVisibility(!state.isRt3dLayerVisible);
+        });
+    }
+    const refreshRt3dButton = document.getElementById('refreshRt3dLayer');
+    if (refreshRt3dButton) {
+        refreshRt3dButton.addEventListener('click', () => {
+            if ((state.coverageData?.engine || state.txData?.coverageEngine) !== 'rt3d') {
+                showToast('Gere uma cobertura usando o motor RT3D para atualizar a cena urbana.', true);
+                return;
+            }
+            generateCoverage();
+        });
+    }
+    const toggleRt3dRaysButton = document.getElementById('toggleRt3dRays');
+    if (toggleRt3dRaysButton) {
+        toggleRt3dRaysButton.addEventListener('click', () => {
+            if (!state.rt3dRaysLayer.length) {
+                return;
+            }
+            setRt3dRaysVisibility(!state.isRt3dRaysVisible);
+        });
+    }
+    const openViewerBtn = document.getElementById('openRt3dViewer');
+    if (openViewerBtn) {
+        openViewerBtn.addEventListener('click', (event) => {
+            event.preventDefault();
+            const slug = window.coverageProjectSlug;
+            if (!slug) {
+                showToast('Nenhum projeto selecionado.', true);
+                return;
+            }
+            const url = `/rt3d-viewer?project=${encodeURIComponent(slug)}`;
+            window.open(url, '_blank', 'noopener');
+        });
+    }
+    const downloadGeoBtn = document.getElementById('downloadRt3dGeojson');
+    if (downloadGeoBtn) {
+        downloadGeoBtn.addEventListener('click', (event) => {
+            event.preventDefault();
+            const slug = window.coverageProjectSlug;
+            if (!slug) {
+                showToast('Nenhum projeto selecionado.', true);
+                return;
+            }
+            const url = `/projects/${encodeURIComponent(slug)}/rt3d-scene.geojson`;
+            window.open(url, '_blank', 'noopener');
+        });
+    }
 }
 
 function initCoverageMap() {
@@ -1617,6 +2000,26 @@ function initCoverageMap() {
                 state.coverageData.signal_level_dict = state.coverageData.signal_level_dict || null;
                 state.coverageData.signal_level_dict_dbm = state.coverageData.signal_level_dict_dbm || null;
                 state.coverageData.location_status = state.coverageData.location_status || null;
+                state.coverageData.rt3dScene = state.coverageData.rt3dScene
+                    || state.coverageData.rt3d_scene
+                    || null;
+                state.coverageData.rt3dDiagnostics = state.coverageData.rt3dDiagnostics
+                    || state.coverageData.rt3d_diagnostics
+                    || null;
+                state.coverageData.rt3dRays = state.coverageData.rt3dRays
+                    || state.coverageData.rt3d_rays
+                    || null;
+                state.coverageData.rt3dSettings = state.coverageData.rt3dSettings
+                    || state.coverageData.rt3d_settings
+                    || null;
+                if (state.coverageData.engine !== 'rt3d') {
+                    state.coverageData.rt3dScene = null;
+                    state.coverageData.rt3dDiagnostics = null;
+                    state.coverageData.rt3dRays = null;
+                    state.coverageData.rt3dSettings = null;
+                    state.isRt3dLayerVisible = true;
+                    state.isRt3dRaysVisible = true;
+                }
 
                 if (state.coverageData.center_metrics) {
                     updateCenterSummary(state.coverageData.center_metrics);
@@ -1648,6 +2051,7 @@ function initCoverageMap() {
                 gestureHandling: 'greedy',
             });
             state.rxInfoWindow = new google.maps.InfoWindow();
+            state.sceneInfoWindow = new google.maps.InfoWindow();
 
             state.txMarker = new google.maps.Marker({
                 position: txLatLng,
@@ -1671,6 +2075,10 @@ function initCoverageMap() {
             if (state.coverageData) {
                 state.coverageData.signal_level_dict = null;
                 state.coverageData.signal_level_dict_dbm = null;
+                if (!state.coverageData.rt3dScene && state.coverageData.rt3d_scene) {
+                    state.coverageData.rt3dScene = state.coverageData.rt3d_scene;
+                }
+                renderRt3dScene(state.coverageData.rt3dScene);
             }
 
             if (state.coverageData && state.coverageData.asset_id) {

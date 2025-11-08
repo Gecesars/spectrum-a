@@ -202,6 +202,23 @@
     color: var(--text-secondary);
 }
 
+.rt3d-grid {
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
+}
+
+#rt3dPanel .badge {
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+}
+
+#rt3dPanel .btn {
+    font-weight: 600;
+}
+
+#rt3dPanel .assist-text {
+    font-size: 0.8rem;
+}
+
 .map-canvas {
     position: relative;
     border-radius: 20px;

@@ -82,6 +82,8 @@ def create_app():
     from app_core.routes.projects import bp as projects_bp, api_bp as projects_api_bp
     app.register_blueprint(projects_bp)
     app.register_blueprint(projects_api_bp)
+    from app_core.regulatory.api import bp as regulator_api_bp
+    app.register_blueprint(regulator_api_bp)
 
     @app.context_processor
     def inject_defaults():

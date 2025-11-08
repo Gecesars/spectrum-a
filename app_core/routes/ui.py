@@ -32,7 +32,7 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 from scipy.constants import c
 from scipy.integrate import simpson
-from scipy.interpolate import interp1d, CubicSpline
+from scipy.interpolate import interp1d, CubicSpline, griddata
 from scipy.ndimage import gaussian_filter1d
 from shapely.geometry import Point, Polygon
 from geopy.distance import geodesic
@@ -65,7 +65,7 @@ from app_core.models import (
 )
 from app_core.email_utils import generate_token, load_token, send_email
 from app_core.storage import ensure_storage_structure, storage_root
-from app_core.data_acquisition import ensure_geodata_availability, global_srtm_dir
+from app_core.data_acquisition import ensure_geodata_availability, ensure_rt3d_scene, global_srtm_dir
 from app_core.utils import (
     ensure_unique_slug,
     project_by_slug_or_404,
@@ -73,6 +73,7 @@ from app_core.utils import (
     projects_to_dict,
     slugify,
 )
+from app_core.regulatory.service import build_default_payload
 
 matplotlib.use('Agg')
 
@@ -600,6 +601,29 @@ def salvar_dados():
             "minSignalLevel": _coerce_float(data.get('minSignalLevel')),
             "maxSignalLevel": _coerce_float(data.get('maxSignalLevel')),
         }
+        if coverage_engine == CoverageEngine.rt3d.value:
+            rt3d_numeric_fields = (
+                "rt3dUrbanRadius",
+                "rt3dRays",
+                "rt3dBounces",
+                "rt3dOcclusionPerMeter",
+                "rt3dReflectionGain",
+                "rt3dInterferencePenalty",
+                "rt3dSamples",
+                "rt3dRings",
+                "rt3dRayStep",
+                "rt3dDiffractionBoost",
+                "rt3dMinimumClearance",
+            )
+            for key in rt3d_numeric_fields:
+                if key in data:
+                    value = _coerce_float(data.get(key))
+                    if value is not None:
+                        project_settings_payload[key] = value
+            if "rt3dBuildingSource" in data:
+                source_value = _coerce_str(data.get("rt3dBuildingSource"))
+                if source_value:
+                    project_settings_payload["rt3dBuildingSource"] = source_value
         base_settings = project.settings or {}
         updated_settings = dict(base_settings)
         for key, value in project_settings_payload.items():
@@ -650,6 +674,21 @@ def salvar_dados():
         "coverageEngine": coverage_engine,
         "projectSlug": project.slug if project else None,
     }
+    if coverage_engine == CoverageEngine.rt3d.value:
+        response_payload.update({
+            "rt3dUrbanRadius": _coerce_float(data.get('rt3dUrbanRadius')),
+            "rt3dRays": _coerce_float(data.get('rt3dRays')),
+            "rt3dBounces": _coerce_float(data.get('rt3dBounces')),
+            "rt3dOcclusionPerMeter": _coerce_float(data.get('rt3dOcclusionPerMeter')),
+            "rt3dReflectionGain": _coerce_float(data.get('rt3dReflectionGain')),
+            "rt3dInterferencePenalty": _coerce_float(data.get('rt3dInterferencePenalty')),
+            "rt3dSamples": _coerce_float(data.get('rt3dSamples')),
+            "rt3dRings": _coerce_float(data.get('rt3dRings')),
+            "rt3dBuildingSource": _coerce_str(data.get('rt3dBuildingSource')),
+            "rt3dRayStep": _coerce_float(data.get('rt3dRayStep')),
+            "rt3dDiffractionBoost": _coerce_float(data.get('rt3dDiffractionBoost')),
+            "rt3dMinimumClearance": _coerce_float(data.get('rt3dMinimumClearance')),
+        })
     if project:
         response_payload["projectSettings"] = project.settings or {}
 
@@ -1056,8 +1095,369 @@ def reset_password(token):
 @bp.route('/home')
 @login_required
 def home():
-    projects = current_user.projects.order_by(Project.created_at.desc()).all()
-    return render_template('home.html', projects=projects)
+    try:
+        projects = current_user.projects.order_by(Project.created_at.desc()).all()
+    except Exception:
+        projects = []
+
+    requested_slug = request.args.get('project')
+    selected_project = None
+    if requested_slug:
+        selected_project = next((p for p in projects if p.slug == requested_slug), None)
+    if not selected_project and projects:
+        selected_project = projects[0]
+
+    project_settings = (selected_project.settings or {}) if selected_project else {}
+
+    # snapshot já contempla merge entre job e artifacts;
+    # usamos o helper para não duplicar lógica com outras telas.
+    coverage_snapshot = _latest_coverage_snapshot(selected_project) if selected_project else None
+
+    def _value_from_sources(keys, user_attr=None):
+        """Busca o primeiro valor válido considerando settings salvos,
+        payload da última cobertura e, por fim, o atributo do usuário."""
+        keys_list = keys if isinstance(keys, (list, tuple)) else [keys]
+        sources = []
+        if isinstance(project_settings, dict):
+            sources.append(project_settings)
+        if isinstance(coverage_snapshot, dict):
+            request_payload = coverage_snapshot.get('request')
+            if isinstance(request_payload, dict):
+                sources.append(request_payload)
+            sources.append(coverage_snapshot)
+        for source in sources:
+            for key in keys_list:
+                if key in source:
+                    value = source.get(key)
+                    if value not in (None, '', []):
+                        return value
+        if user_attr:
+            return getattr(current_user, user_attr, None)
+        return None
+
+    def _parse_iso_timestamp(value):
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value.replace('Z', '+00:00'))
+        except Exception:
+            return None
+
+    def _format_metric(label, value, unit=None, precision=2):
+        if value is None or value == '':
+            return {'label': label, 'value': '—', 'is_empty': True}
+        if isinstance(value, (int, float)):
+            formatted = f"{float(value):.{precision}f}"
+            if '.' in formatted:
+                formatted = formatted.rstrip('0').rstrip('.')
+        else:
+            formatted = str(value)
+        if unit:
+            formatted = f"{formatted} {unit}"
+        return {'label': label, 'value': formatted, 'is_empty': False}
+
+    def _asset_url(asset_id):
+        if not (selected_project and asset_id):
+            return None
+        try:
+            return url_for('projects.asset_preview', slug=selected_project.slug, asset_id=asset_id)
+        except Exception:
+            return None
+
+    def _encode_image(blob):
+        if not blob:
+            return None
+        return base64.b64encode(blob).decode('utf-8')
+
+    def _coerce_float(value):
+        if value in (None, '', []):
+            return value
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return value
+
+    def _normalize_receivers(receivers):
+        normalized = []
+        if not isinstance(receivers, list):
+            return normalized
+        for idx, raw in enumerate(receivers):
+            if not isinstance(raw, dict):
+                continue
+            label = raw.get('label') or raw.get('name') or f'RX {idx + 1}'
+            location = raw.get('location') if isinstance(raw.get('location'), dict) else {}
+            lat = raw.get('lat')
+            if lat is None:
+                lat = location.get('lat')
+            lng = raw.get('lng')
+            if lng is None:
+                lng = location.get('lng') or location.get('lon')
+            normalized.append({
+                'label': label,
+                'municipality': raw.get('municipality') or location.get('municipality'),
+                'coordinates': {'lat': lat, 'lng': lng} if lat is not None and lng is not None else None,
+                'field': raw.get('field_strength_dbuv_m') or raw.get('field_dbuv') or raw.get('field'),
+                'power': raw.get('power_dbm') or raw.get('received_power_dbm') or raw.get('power'),
+                'distance': raw.get('distance_km') or raw.get('distance'),
+                'altitude': raw.get('altitude_m') or location.get('altitude'),
+                'quality': raw.get('quality') or raw.get('status'),
+            })
+        return normalized
+
+    freq_mhz = _value_from_sources(['frequency', 'frequencia'], 'frequencia')
+    tx_power_w = _value_from_sources(['transmissionPower', 'transmission_power'], 'transmission_power')
+    antenna_gain_dbi = _value_from_sources(['antennaGain', 'antenna_gain'], 'antenna_gain')
+    rx_gain_dbi = _value_from_sources(['rxGain', 'rx_gain'], 'rx_gain')
+    tower_height_m = _value_from_sources(['towerHeight', 'tower_height'], 'tower_height')
+    rx_height_m = _value_from_sources(['rxHeight', 'rx_height'], 'rx_height')
+    total_loss_db = _value_from_sources(['Total_loss', 'total_loss', 'totalLoss'], 'total_loss')
+    direction_deg = _value_from_sources(['antennaDirection'], 'antenna_direction')
+    tilt_deg = _value_from_sources(['antennaTilt'], 'antenna_tilt')
+    time_percentage = _value_from_sources(['timePercentage'], 'time_percentage')
+    polarization = _value_from_sources(['polarization'], 'polarization')
+    service_type = _value_from_sources(['serviceType', 'servico'], 'servico')
+    propagation_model = _value_from_sources(['propagationModel'], 'propagation_model')
+    temperature_val = _value_from_sources(['temperature'], 'temperature_k')
+    pressure_hpa = _value_from_sources(['pressure'], 'pressure_hpa')
+    water_density = _value_from_sources(['waterDensity'], 'water_density')
+    latitude = _value_from_sources(['latitude'], 'latitude')
+    longitude = _value_from_sources(['longitude'], 'longitude')
+    tx_site_elevation = _value_from_sources(['tx_site_elevation', 'txSiteElevation'], 'tx_site_elevation')
+    tx_location_name = _value_from_sources(['tx_location_name', 'txLocationName'], 'tx_location_name')
+
+    if temperature_val is not None and temperature_val > 200:
+        temperature_display = temperature_val - 273.15
+    else:
+        temperature_display = temperature_val
+
+    coverage_engine = None
+    if isinstance(coverage_snapshot, dict):
+        coverage_engine = coverage_snapshot.get('engine')
+    if not coverage_engine:
+        coverage_engine = project_settings.get('coverageEngine')
+
+    coverage_radius_km = None
+    if isinstance(coverage_snapshot, dict):
+        coverage_radius_km = (
+            coverage_snapshot.get('radius_km')
+            or coverage_snapshot.get('requested_radius_km')
+            or coverage_snapshot.get('radius')
+        )
+    if coverage_radius_km is None:
+        coverage_radius_km = project_settings.get('radius')
+
+    coverage_generated_at = coverage_snapshot.get('generated_at') if isinstance(coverage_snapshot, dict) else None
+    coverage_generated_at_dt = _parse_iso_timestamp(coverage_generated_at)
+
+    tx_coordinates = None
+    if isinstance(coverage_snapshot, dict):
+        tx_coordinates = coverage_snapshot.get('center') or coverage_snapshot.get('tx_location')
+    if not tx_coordinates and latitude is not None and longitude is not None:
+        tx_coordinates = {'lat': latitude, 'lng': longitude}
+    if isinstance(tx_coordinates, dict):
+        lat_val = _coerce_float(tx_coordinates.get('lat') or tx_coordinates.get('latitude'))
+        lon_val = _coerce_float(tx_coordinates.get('lng') or tx_coordinates.get('lon') or tx_coordinates.get('longitude'))
+        tx_coordinates = {'lat': lat_val, 'lng': lon_val}
+
+    center_metrics = coverage_snapshot.get('center_metrics') if isinstance(coverage_snapshot, dict) else {}
+    loss_components = coverage_snapshot.get('loss_components') if isinstance(coverage_snapshot, dict) else {}
+    gain_components = coverage_snapshot.get('gain_components') if isinstance(coverage_snapshot, dict) else {}
+    rt3d_diagnostics = coverage_snapshot.get('rt3d_diagnostics') if isinstance(coverage_snapshot, dict) else None
+
+    erp_dbm = None
+    if tx_power_w not in (None, ''):
+        try:
+            tx_power_dbm = 10 * math.log10(max(float(tx_power_w), 1e-6) * 1000)
+            erp_dbm = tx_power_dbm + float(antenna_gain_dbi or 0.0) - float(total_loss_db or 0.0)
+        except Exception:
+            erp_dbm = None
+    erp_kw = None
+    if erp_dbm is not None:
+        try:
+            erp_w = 10 ** (erp_dbm / 10) / 1000.0
+            erp_kw = erp_w / 1000.0
+        except Exception:
+            erp_kw = None
+
+    technical_sections = []
+    technical_sections.append({
+        'title': 'Transmissor',
+        'rows': [
+            _format_metric('Frequência', freq_mhz, 'MHz'),
+            _format_metric('Potência TX', tx_power_w, 'W'),
+            _format_metric('ERP (dBm)', erp_dbm, 'dBm'),
+            _format_metric('ERP (kW)', erp_kw, 'kW', precision=3),
+            _format_metric('Ganho TX', antenna_gain_dbi, 'dBi'),
+            _format_metric('Ganho RX', rx_gain_dbi, 'dBi'),
+        ],
+    })
+    technical_sections.append({
+        'title': 'Estrutura física',
+        'rows': [
+            _format_metric('Altura da torre', tower_height_m, 'm'),
+            _format_metric('Altura do receptor', rx_height_m, 'm'),
+            _format_metric('Perdas do sistema', total_loss_db, 'dB'),
+            _format_metric('Azimute da antena', direction_deg, '°'),
+            _format_metric('Tilt elétrico', tilt_deg, '°'),
+        ],
+    })
+    technical_sections.append({
+        'title': 'Ambiente e serviço',
+        'rows': [
+            _format_metric('Cenário de propagação', propagation_model, None),
+            _format_metric('Serviço', service_type, None),
+            _format_metric('Polarização', polarization, None),
+            _format_metric('Tempo (%)', time_percentage, '%'),
+            _format_metric('Temperatura', temperature_display, '°C'),
+            _format_metric('Pressão', pressure_hpa, 'hPa'),
+            _format_metric('Densidade de vapor', water_density, 'g/m³'),
+        ],
+    })
+
+    coverage_metrics_panel = [
+        _format_metric('Campo no centro', center_metrics.get('field_center_dbuv_m'), 'dBµV/m'),
+        _format_metric('Potência recebida', center_metrics.get('received_power_center_dbm'), 'dBm'),
+        _format_metric('Perda combinada', center_metrics.get('combined_loss_center_db'), 'dB'),
+        _format_metric('Ganho efetivo', center_metrics.get('effective_gain_center_db'), 'dB'),
+        _format_metric('Distância ao centro', center_metrics.get('distance_center_km'), 'km', precision=3),
+    ]
+
+    coverage_loss_panel = []
+    for key, label in (
+        ('L_b', 'Atenuação total (L_b)'),
+        ('L_bd', 'Difração (L_bd)'),
+        ('L_bs', 'Espalhamento (L_bs)'),
+    ):
+        component = loss_components.get(key) if isinstance(loss_components, dict) else None
+        center_value = component.get('center') if isinstance(component, dict) else None
+        coverage_loss_panel.append(_format_metric(label, center_value, component.get('unit') if isinstance(component, dict) else 'dB'))
+
+    gain_panel = [
+        _format_metric('Ganho de pico', gain_components.get('base_gain_dbi'), 'dBi'),
+        _format_metric('Ajuste horizontal', gain_components.get('horizontal_adjustment_db_min'), 'dB'),
+        _format_metric('Ajuste vertical', gain_components.get('vertical_adjustment_db'), 'dB'),
+        _format_metric('Horizonte vertical', gain_components.get('vertical_horizon_db'), 'dB'),
+    ]
+
+    tx_site_elevation = _coerce_float(tx_site_elevation)
+    coverage_radius_km = _coerce_float(coverage_radius_km)
+
+    coverage_artifacts = {
+        'heatmap_url': _asset_url(coverage_snapshot.get('asset_id')) if coverage_snapshot else None,
+        'colorbar_url': _asset_url(coverage_snapshot.get('colorbar_asset_id')) if coverage_snapshot else None,
+        'rt3d_viewer_url': url_for('ui.rt3d_viewer', project=selected_project.slug)
+        if (selected_project and isinstance(coverage_snapshot, dict) and coverage_snapshot.get('rt3d_scene'))
+        else None,
+    }
+
+    receivers_summary = _normalize_receivers(coverage_snapshot.get('receivers') if isinstance(coverage_snapshot, dict) else [])[:4] if coverage_snapshot else []
+
+    dataset_sources_preview = []
+    reports_preview = []
+    if selected_project:
+        dataset_sources_preview = sorted(
+            selected_project.dataset_sources,
+            key=lambda ds: ds.created_at or datetime.min,
+            reverse=True,
+        )[:4]
+        reports_preview = sorted(
+            selected_project.reports,
+            key=lambda rp: rp.created_at or datetime.min,
+            reverse=True,
+        )[:3]
+
+    request_highlights = []
+    request_payload = coverage_snapshot.get('request') if isinstance(coverage_snapshot, dict) else {}
+    request_label_map = {
+        'coverageEngine': ('Motor solicitado', None),
+        'radius': ('Raio máximo', 'km'),
+        'minScale': ('Escala mínima', 'dBµV/m'),
+        'maxScale': ('Escala máxima', 'dBµV/m'),
+        'gridResolution': ('Resolução do grid', 'm'),
+        'rt3dReflectionGain': ('Ganho de reflexão', 'dB'),
+        'rt3dRayDepth': ('Máx. reflexões', None),
+        'rt3dDiffractionOrder': ('Ordem de difração', None),
+        'rt3dUseBuildings': ('Uso das edificações', None),
+    }
+    if isinstance(request_payload, dict):
+        for key, (label, unit) in request_label_map.items():
+            if key in request_payload:
+                request_highlights.append(_format_metric(label, request_payload.get(key), unit))
+
+    preference_highlights = []
+    for key, label, unit in (
+        ('coverageEngine', 'Motor preferido', None),
+        ('timePercentage', 'Tempo de disponibilidade', '%'),
+        ('p452Version', 'Versão ITU-R P.452', None),
+        ('propagationModel', 'Cenário', None),
+        ('serviceType', 'Serviço', None),
+    ):
+        preference_highlights.append(_format_metric(label, project_settings.get(key), unit))
+
+    image_gallery = {
+        'profile': _encode_image(current_user.perfil_img),
+        'legacy_coverage': _encode_image(current_user.cobertura_img),
+        'diagram_h': _encode_image(current_user.antenna_pattern_img_dia_H),
+        'diagram_v': _encode_image(current_user.antenna_pattern_img_dia_V),
+    }
+
+    project_overview = {
+        'project': selected_project,
+        'engine': coverage_engine,
+        'radius_km': coverage_radius_km,
+        'location_name': tx_location_name,
+        'coordinates': tx_coordinates,
+        'tx_site_elevation': tx_site_elevation,
+        'generated_at_dt': coverage_generated_at_dt,
+        'generated_at_raw': coverage_generated_at,
+        'assets_count': len(selected_project.assets) if selected_project else 0,
+        'reports_count': len(selected_project.reports) if selected_project else 0,
+        'jobs_count': len(selected_project.coverage_jobs) if selected_project else 0,
+        'has_aoi': bool(selected_project and selected_project.aoi_geojson),
+    }
+
+    project_actions = []
+    coverage_url = url_for('ui.calcular_cobertura', project=selected_project.slug) if selected_project else url_for('ui.calcular_cobertura')
+    mapa_url = url_for('ui.mapa', project=selected_project.slug) if selected_project else url_for('ui.mapa')
+    dados_url = url_for('ui.visualizar_dados_salvos', project=selected_project.slug) if selected_project else url_for('ui.visualizar_dados_salvos')
+    project_actions.append({'label': 'Planejar cobertura', 'description': 'Atualize parâmetros e gere novas manchas.', 'url': coverage_url, 'variant': 'brand'})
+    project_actions.append({'label': 'Abrir mapa & receptores', 'description': 'Visualize a última mancha em campo e gerencie receptores.', 'url': mapa_url})
+    project_actions.append({'label': 'Dados e artefatos', 'description': 'Revise imagens, perfis e notas consolidadas.', 'url': dados_url})
+    project_actions.append({'label': 'Gerar relatório PDF', 'description': 'Exporta parâmetros e imagens do estudo em um único documento.', 'url': url_for('ui.download_report')})
+
+    rt3d_panel = []
+    if isinstance(rt3d_diagnostics, dict):
+        rt3d_panel = [
+            _format_metric('Pontuação de reflexões', rt3d_diagnostics.get('reflection_gain'), 'dB'),
+            _format_metric('Média de multipath', rt3d_diagnostics.get('multipath_mean'), 'dB'),
+            _format_metric('Taxa de oclusão', rt3d_diagnostics.get('occlusion_rate'), None),
+            _format_metric('Altura mediana', rt3d_diagnostics.get('median_height'), 'm'),
+        ]
+
+    return render_template(
+        'home.html',
+        projects=projects,
+        selected_project=selected_project,
+        project_overview=project_overview,
+        technical_sections=technical_sections,
+        coverage_metrics_panel=coverage_metrics_panel,
+        coverage_loss_panel=coverage_loss_panel,
+        gain_panel=gain_panel,
+        coverage_artifacts=coverage_artifacts,
+        receivers_summary=receivers_summary,
+        dataset_sources=dataset_sources_preview,
+        reports_preview=reports_preview,
+        image_gallery=image_gallery,
+        request_highlights=request_highlights,
+        preference_highlights=preference_highlights,
+        notes_value=current_user.notes or '',
+        project_actions=project_actions,
+        rt3d_panel=rt3d_panel,
+        has_projects=bool(projects),
+        new_project_url=url_for('projects.new_project'),
+        projects_list_url=url_for('projects.list_projects'),
+        coverage_snapshot=coverage_snapshot,
+    )
 
 # -------- Antena: carregar/mostrar diagramas --------
 
@@ -1449,6 +1849,14 @@ def update_notes():
         return jsonify({'message': 'Notas atualizadas com sucesso!'}), 200
     else:
         return jsonify({'error': 'Nenhuma nota fornecida.'}), 400
+
+
+@bp.route('/projects/<slug>/regulator/payload', methods=['GET'])
+@login_required
+def regulatory_payload(slug):
+    project = project_by_slug_or_404(slug, current_user.uuid)
+    payload = build_default_payload(project)
+    return jsonify({'project': project.slug, 'data': payload})
 
 # -------- Elevação Google --------
 
@@ -2405,6 +2813,219 @@ def _google_elevation_profile(start_coords, end_coords, samples=256):
         return None
 
 
+def _estimate_google_block_penalty(elevations: np.ndarray) -> float:
+    if elevations.size < 12:
+        return 0.0
+    sigma = max(1.0, elevations.size / 80.0)
+    smooth = gaussian_filter1d(elevations, sigma=sigma, mode='nearest')
+    residual = elevations - smooth
+    spikes = residual > 3.5
+    if not np.any(spikes):
+        return 0.0
+    penalty = float(np.count_nonzero(spikes)) * 0.7
+    return float(np.clip(penalty, 0.0, 30.0))
+
+
+def _apply_rt3d_penalty(total_loss_db, lat_grid, lon_grid, lat_tx_deg, lon_tx_deg, radius_km, tx, data, scene=None):
+    engine = (data.get('coverageEngine') or CoverageEngine.p1546.value).lower()
+    if engine != CoverageEngine.rt3d.value:
+        return total_loss_db, {}
+
+    tx_ground = getattr(tx, 'tx_site_elevation', None)
+    if tx_ground is None:
+        tx_ground = _compute_site_elevation(lat_tx_deg, lon_tx_deg) or 0.0
+    tx_height = getattr(tx, 'tower_height', None) or 30.0
+    tx_altitude = tx_ground + tx_height
+    rx_height = getattr(tx, 'rx_height', None) or 1.5
+
+    occlusion_rate = float(_coerce_float(data.get('rt3dOcclusionPerMeter')) or 0.8)
+    reflection_gain = float(_coerce_float(data.get('rt3dReflectionGain')) or 0.35)
+    interference_rate = float(_coerce_float(data.get('rt3dInterferencePenalty')) or 0.25)
+    reflection_cap = float(_coerce_float(data.get('rt3dReflectionCap')) or 12.0)
+    minimum_clearance_m = float(_coerce_float(data.get('rt3dMinimumClearance'))
+                                or getattr(tx, 'rt3dMinimumClearance', None)
+                                or 2.0)
+    diffraction_boost_db = float(_coerce_float(data.get('rt3dDiffractionBoost'))
+                                 or getattr(tx, 'rt3dDiffractionBoost', None)
+                                 or 1.5)
+
+    diagnostics = {
+        'occlusion_rate': occlusion_rate,
+        'reflection_gain': reflection_gain,
+        'interference_rate': interference_rate,
+    }
+    MAX_RAYS = 250
+    rays: list[dict] = []
+    meta = {
+        'quality_map': None,
+        'occlusion_map': None,
+        'reflection_map': None,
+        'multipath_map': None,
+        'mode': None,
+        'diagnostics': diagnostics,
+        'rays': rays,
+    }
+    lat_axis = lat_grid[:, 0]
+    lon_axis = lon_grid[0, :]
+
+    scene_payload = scene or {}
+    if scene_payload.get('points') is None:
+        scene_payload['points'] = []
+    points_payload = scene_payload.get('points')
+    if points_payload:
+        pts = np.array([[pt['lat'], pt['lon'], pt['height_m']] for pt in points_payload if pt.get('height_m') is not None], dtype=float)
+        if pts.size >= 3:
+            building_grid = griddata(
+                (pts[:, 0], pts[:, 1]),
+                pts[:, 2],
+                (lat_grid, lon_grid),
+                method='linear',
+                fill_value=np.nan,
+            )
+            if np.isnan(building_grid).all():
+                building_grid = np.zeros_like(lat_grid)
+            else:
+                building_grid = np.nan_to_num(building_grid, nan=np.nanmedian(pts[:, 2]))
+
+            clearance = tx_altitude - building_grid
+            occlusion_factor = np.clip(minimum_clearance_m - clearance, 0.0, None)
+            occlusion_loss = occlusion_factor * occlusion_rate
+            reflection_bonus = np.clip(building_grid - tx_altitude + rx_height, 0.0, None) * reflection_gain
+            reflection_bonus = np.clip(reflection_bonus, 0.0, reflection_cap)
+
+            diffraction_mask = np.logical_and(clearance < minimum_clearance_m, clearance > -minimum_clearance_m)
+            reflection_bonus = reflection_bonus + (diffraction_mask.astype(float) * diffraction_boost_db)
+
+            grad_lat, grad_lon = np.gradient(building_grid)
+            multipath = np.sqrt(np.abs(grad_lat) + np.abs(grad_lon)) * interference_rate
+
+            total_loss = total_loss_db + occlusion_loss + multipath - reflection_bonus
+            quality_map = reflection_bonus - occlusion_loss - multipath
+
+            diagnostics.update({
+                'mode': 'scene',
+                'points_used': int(len(points_payload)),
+                'median_height': scene_payload.get('median_height'),
+                'occlusion_mean': float(np.nanmean(occlusion_loss)),
+                'reflection_mean': float(np.nanmean(reflection_bonus)),
+                'multipath_mean': float(np.nanmean(multipath)),
+            })
+            meta.update({
+                'quality_map': quality_map,
+                'occlusion_map': occlusion_loss,
+                'reflection_map': reflection_bonus,
+                'multipath_map': multipath,
+                'mode': 'scene',
+            })
+            scene_payload['diagnostics'] = diagnostics
+            sample_count = min(len(points_payload), 200)
+            stride = max(1, len(points_payload) // sample_count)
+            for idx, pt in enumerate(points_payload):
+                if idx % stride != 0:
+                    continue
+                lat_pt = float(pt.get('lat'))
+                lon_pt = float(pt.get('lon'))
+                height_pt = float(pt.get('height_m') or 0.0)
+                clearance = tx_altitude - height_pt
+                if clearance >= 5.0:
+                    ray_mode = 'los'
+                elif height_pt >= tx_altitude:
+                    ray_mode = 'reflection'
+                else:
+                    ray_mode = 'obstruction'
+                lat_idx = int(np.clip(np.searchsorted(lat_axis, lat_pt), 0, lat_axis.size - 1))
+                lon_idx = int(np.clip(np.searchsorted(lon_axis, lon_pt), 0, lon_axis.size - 1))
+                sample_quality = float(quality_map[lat_idx, lon_idx])
+                rays.append({
+                    'mode': ray_mode,
+                    'path': [
+                        {'lat': lat_tx_deg, 'lng': lon_tx_deg},
+                        {'lat': lat_pt, 'lng': lon_pt},
+                    ],
+                    'height_m': height_pt,
+                    'quality_db': sample_quality,
+                })
+            current_app.logger.info(
+                'rt3d.penalty.applied',
+                extra={'mode': 'scene', 'points': len(points_payload)},
+            )
+            return total_loss, meta
+
+    api_key = current_app.config.get('GOOGLE_MAPS_API_KEY')
+    if not api_key:
+        current_app.logger.warning('rt3d.penalty.skip', extra={'reason': 'missing_assets'})
+        return total_loss_db, meta
+
+    num_rings = int(data.get('rt3dRings', 6))
+    num_rays = int(data.get('rt3dRays', 32))
+    num_rings = max(3, min(10, num_rings))
+    num_rays = max(12, min(72, num_rays))
+
+    samples_per_request = int(data.get('rt3dSamples', 180))
+    samples_per_request = max(64, min(512, samples_per_request))
+
+    collected_points: list[tuple[float, float]] = []
+    penalties: list[float] = []
+
+    for ring_idx in range(1, num_rings + 1):
+        distance = radius_km * (ring_idx / num_rings)
+        if distance < 0.1:
+            continue
+        for ray_idx in range(num_rays):
+            bearing = (360.0 / num_rays) * ray_idx
+            destination = geodesic(kilometers=distance).destination((lat_tx_deg, lon_tx_deg), bearing)
+            rx_lat = destination.latitude
+            rx_lon = destination.longitude
+            profile = _google_elevation_profile(
+                {'lat': lat_tx_deg, 'lng': lon_tx_deg},
+                {'lat': rx_lat, 'lng': rx_lon},
+                samples=max(samples_per_request, int(distance * 12)),
+            )
+            if not profile:
+                continue
+            elevations = np.asarray(profile['elevations_m'], dtype=float)
+            penalty = _estimate_google_block_penalty(elevations)
+            if penalty <= 0.3:
+                continue
+            collected_points.append((rx_lat, rx_lon))
+            penalties.append(penalty)
+            rays.append({
+                'mode': 'profile',
+                'path': [
+                    {'lat': lat_tx_deg, 'lng': lon_tx_deg},
+                    {'lat': rx_lat, 'lng': rx_lon},
+                ],
+                'quality_db': float(penalty) * -1.0,
+            })
+
+    if not penalties:
+        current_app.logger.info('rt3d.penalty.skip', extra={'reason': 'no_penalties'})
+        return total_loss_db, meta
+
+    points = np.array(collected_points)
+    values = np.array(penalties)
+    penalty_surface = griddata(
+        points,
+        values,
+        (lat_grid, lon_grid),
+        method='linear',
+        fill_value=0.0,
+    )
+    if np.isnan(penalty_surface).any():
+        penalty_surface = np.nan_to_num(penalty_surface, nan=0.0)
+
+    penalty_surface = np.clip(penalty_surface, 0.0, 36.0)
+    diagnostics.update({'mode': 'profile', 'samples': len(penalties)})
+    meta['mode'] = 'profile'
+    if scene is not None:
+        scene_payload['diagnostics'] = diagnostics
+    if len(rays) > MAX_RAYS:
+        stride = max(1, len(rays) // MAX_RAYS)
+        rays[:] = rays[::stride]
+    current_app.logger.info('rt3d.penalty.applied', extra={'samples': len(penalties), 'mode': 'profile'})
+    return total_loss_db + penalty_surface, meta
+
+
 def _render_field_strength_image(lons_deg, lats_deg, field_levels,
                                  radius_km, lon_center_deg, lat_center_deg,
                                  min_val, max_val, horizontal_pattern_db,
@@ -2489,6 +3110,365 @@ def _render_field_strength_image(lons_deg, lats_deg, field_levels,
     return image_base64, colorbar_base64
 
 
+def _compute_rt3d_only_map(tx, data, include_arrays=False, label=None, rt3d_scene=None):
+    def _coerce_optional(value):
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        value_str = str(value).strip()
+        if not value_str:
+            return None
+        try:
+            return float(value_str)
+        except ValueError:
+            return None
+
+    def _determine_auto_scale_local(arr, user_min, user_max):
+        arr_np = np.asarray(arr, dtype=float)
+        finite_vals = arr_np[np.isfinite(arr_np)]
+        if finite_vals.size == 0:
+            return (0.0, 1.0)
+        auto_min = float(np.nanmin(finite_vals))
+        auto_max = float(np.nanmax(finite_vals))
+        vmin = float(user_min) if user_min is not None else auto_min
+        vmax = float(user_max) if user_max is not None else auto_max
+        if abs(vmax - vmin) < 1e-9:
+            vmax = vmin + 1.0
+        return (vmin, vmax)
+
+    def _fill_holes(mask_in, arr_plot):
+        vals = arr_plot[mask_in & np.isfinite(arr_plot)]
+        if vals.size > 0:
+            fill_val = float(np.nanmin(vals))
+            hole_mask = mask_in & ~np.isfinite(arr_plot)
+            arr_plot[hole_mask] = fill_val
+        return arr_plot
+
+    def _safe_value_at_center(arr, center_idx):
+        arr_np = np.asarray(arr, dtype=float)
+        try:
+            return float(arr_np[center_idx])
+        except Exception:
+            if np.ndim(arr_np) == 0:
+                return float(arr_np)
+            finite_mask = np.isfinite(arr_np)
+            if np.any(finite_mask):
+                return float(np.nanmean(arr_np[finite_mask]))
+            return None
+
+    def _summarize_component(arr):
+        arr_np = np.asarray(arr, dtype=float)
+        finite_mask = np.isfinite(arr_np)
+        if not np.any(finite_mask):
+            return None
+        return {
+            'min': float(np.nanmin(arr_np)),
+            'max': float(np.nanmax(arr_np)),
+            'unit': 'dB',
+            'center': float(np.nanmean(arr_np[finite_mask])),
+        }
+
+    def _haversine_km(lat1, lon1, lat2, lon2):
+        R = 6371.0
+        lat1r = np.radians(lat1)
+        lon1r = np.radians(lon1)
+        lat2r = np.radians(lat2)
+        lon2r = np.radians(lon2)
+        dlat = lat2r - lat1r
+        dlon = lon2r - lon1r
+        a = (
+            np.sin(dlat / 2.0) ** 2
+            + np.cos(lat1r) * np.cos(lat2r) * np.sin(dlon / 2.0) ** 2
+        )
+        return 2.0 * R * np.arcsin(np.sqrt(a))
+
+    center_override = data.get('customCenter') or {}
+    try:
+        lon_tx_deg = float(center_override.get('lng', tx.longitude))
+        lat_tx_deg = float(center_override.get('lat', tx.latitude))
+    except (TypeError, ValueError):
+        lon_tx_deg, lat_tx_deg = tx.longitude, tx.latitude
+
+    radius_requested = _coerce_optional(data.get('radius'))
+    if radius_requested is None or radius_requested <= 0:
+        radius_requested = 10.0
+    radius_km = float(radius_requested)
+
+    freq_mhz = getattr(tx, 'frequencia', None) or 100.0
+    if freq_mhz < 50.0:
+        freq_mhz = 50.0
+    frequency = freq_mhz
+
+    loss_sys_db = tx.total_loss or 0.0
+    Ptx_W = max(float(tx.transmission_power or 0.0), 1e-6)
+    Gtx_peak_dBi = tx.antenna_gain or 0.0
+    Grx_dBi = tx.rx_gain or 0.0
+
+    building_source = (data.get('rt3dBuildingSource')
+                       or getattr(tx, 'rt3dBuildingSource', None)
+                       or 'auto').lower()
+    ray_step_m = float(_coerce_optional(data.get('rt3dRayStep'))
+                       or getattr(tx, 'rt3dRayStep', None)
+                       or 25.0)
+    diffraction_boost_db = float(_coerce_optional(data.get('rt3dDiffractionBoost'))
+                                 or getattr(tx, 'rt3dDiffractionBoost', None)
+                                 or 1.5)
+    minimum_clearance_m = float(_coerce_optional(data.get('rt3dMinimumClearance'))
+                                or getattr(tx, 'rt3dMinimumClearance', None)
+                                or 2.0)
+
+    grid_points = int(np.clip((radius_km * 1000.0) / max(ray_step_m, 5.0), 160, 360))
+    lat_extent = radius_km / 111.32
+    cos_lat = max(np.cos(np.radians(lat_tx_deg)), 0.25)
+    lon_extent = radius_km / (111.32 * cos_lat)
+
+    lats_deg = np.linspace(lat_tx_deg - lat_extent, lat_tx_deg + lat_extent, grid_points)
+    lons_deg = np.linspace(lon_tx_deg - lon_extent, lon_tx_deg + lon_extent, grid_points)
+    lon_grid, lat_grid = np.meshgrid(lons_deg, lats_deg)
+
+    dist_km_grid = _haversine_km(lat_grid, lon_grid, lat_tx_deg, lon_tx_deg)
+    inrange_mask = dist_km_grid <= radius_km
+
+    base_loss_db = 32.45 + 20.0 * np.log10(frequency) + 20.0 * np.log10(np.clip(dist_km_grid, 0.05, None))
+    base_loss_db = np.nan_to_num(base_loss_db, nan=0.0)
+
+    total_path_loss_db, penalty_meta = _apply_rt3d_penalty(
+        base_loss_db,
+        lat_grid,
+        lon_grid,
+        lat_tx_deg,
+        lon_tx_deg,
+        radius_km,
+        tx,
+        data,
+        scene=rt3d_scene,
+    )
+
+    Ptx_dBm = 10.0 * math.log10(Ptx_W / 0.001)
+    Gtx_eff_db = float(Gtx_peak_dBi)
+
+    Prx_dbm = (
+        Ptx_dBm
+        + Gtx_eff_db
+        + float(Grx_dBi)
+        - float(loss_sys_db)
+        - total_path_loss_db
+    )
+    Prx_dbm = np.asarray(Prx_dbm, dtype=float)
+
+    freq_mhz_safe = max(float(freq_mhz), 0.1)
+    E_dbuv = (
+        Prx_dbm
+        - float(Grx_dBi)
+        + 77.2
+        + 20.0 * np.log10(freq_mhz_safe)
+    )
+    E_dbuv = np.asarray(E_dbuv, dtype=float)
+
+    E_plot = np.full_like(E_dbuv, np.nan, dtype=float)
+    Prx_plot = np.full_like(Prx_dbm, np.nan, dtype=float)
+    E_plot[inrange_mask] = E_dbuv[inrange_mask]
+    Prx_plot[inrange_mask] = Prx_dbm[inrange_mask]
+    E_plot = _fill_holes(inrange_mask, E_plot)
+    Prx_plot = _fill_holes(inrange_mask, Prx_plot)
+
+    min_val, max_val = _determine_auto_scale_local(E_plot, _coerce_optional(data.get('minSignalLevel')), _coerce_optional(data.get('maxSignalLevel')))
+    power_min, power_max = _determine_auto_scale_local(Prx_plot, None, None)
+
+    lat_diff = np.abs(lats_deg - lat_tx_deg)
+    lon_diff = np.abs(lons_deg - lon_tx_deg)
+    center_idx_lat = int(np.argmin(lat_diff))
+    center_idx_lon = int(np.argmin(lon_diff))
+    center_idx = (center_idx_lat, center_idx_lon)
+
+    bounds = {
+        'north': float(np.nanmax(lats_deg) + (lat_extent / grid_points)),
+        'south': float(np.nanmin(lats_deg) - (lat_extent / grid_points)),
+        'east': float(np.nanmax(lons_deg) + (lon_extent / grid_points)),
+        'west': float(np.nanmin(lons_deg) - (lon_extent / grid_points)),
+    }
+    colorbar_bounds = {
+        'north': bounds['north'],
+        'south': bounds['north'] - max((bounds['north'] - bounds['south']) * 0.05, 1e-4),
+        'east': bounds['east'],
+        'west': bounds['west'],
+    }
+
+    loss_components_summary = {}
+    summary_fspl = _summarize_component(base_loss_db)
+    if summary_fspl:
+        loss_components_summary['fspl'] = summary_fspl
+    if penalty_meta.get('occlusion_map') is not None:
+        summary_penalty = _summarize_component(
+            penalty_meta['occlusion_map']
+            + penalty_meta.get('multipath_map', 0.0)
+            - penalty_meta.get('reflection_map', 0.0)
+        )
+        if summary_penalty:
+            loss_components_summary['rt3d_penalty'] = summary_penalty
+
+    center_metrics = {
+        'combined_loss_center_db': _safe_value_at_center(total_path_loss_db, center_idx),
+        'received_power_center_dbm': _safe_value_at_center(Prx_dbm, center_idx),
+        'field_center_dbuv_m': _safe_value_at_center(E_dbuv, center_idx),
+        'effective_gain_center_db': float(Gtx_eff_db),
+        'tx_power_dbm': float(Ptx_dBm),
+        'system_losses_db': float(loss_sys_db),
+        'frequency_mhz': float(freq_mhz),
+        'radius_km': float(radius_km),
+    }
+
+    try:
+        center_metrics['distance_center_km'] = float(dist_km_grid[center_idx])
+    except Exception:
+        pass
+
+    img_dbuv_b64, colorbar_dbuv_b64 = _render_field_strength_image(
+        lons_deg,
+        lats_deg,
+        E_plot,
+        radius_km,
+        lon_tx_deg,
+        lat_tx_deg,
+        min_val,
+        max_val,
+        None,
+        dist_map_km=dist_km_grid,
+        colorbar_label='Campo elétrico [dBµV/m]'
+    )
+
+    img_dbm_b64, colorbar_dbm_b64 = _render_field_strength_image(
+        lons_deg,
+        lats_deg,
+        Prx_plot,
+        radius_km,
+        lon_tx_deg,
+        lat_tx_deg,
+        power_min,
+        power_max,
+        None,
+        dist_map_km=dist_km_grid,
+        colorbar_label='Potência recebida [dBm]'
+    )
+
+    quality_map = penalty_meta.get('quality_map')
+    if quality_map is not None:
+        qmin, qmax = _determine_auto_scale_local(quality_map, None, None)
+        img_rt3d_b64, colorbar_rt3d_b64 = _render_field_strength_image(
+            lons_deg,
+            lats_deg,
+            quality_map,
+            radius_km,
+            lon_tx_deg,
+            lat_tx_deg,
+            qmin,
+            qmax,
+            None,
+            dist_map_km=dist_km_grid,
+            colorbar_label='Qualidade RT3D [dB]',
+        )
+        images_payload = {
+            "rt3d": {
+                "image": img_rt3d_b64,
+                "colorbar": colorbar_rt3d_b64,
+                "label": "Qualidade RT3D [dB]",
+                "unit": "rt3d",
+            },
+        }
+        scale_payload = {
+            "default_unit": "rt3d",
+            "min": qmin,
+            "max": qmax,
+            "units": {
+                "rt3d": {"min": qmin, "max": qmax},
+            },
+        }
+    else:
+        images_payload = {
+            "dbuv": {
+                "image": img_dbuv_b64,
+                "colorbar": colorbar_dbuv_b64,
+                "label": "Campo elétrico [dBµV/m]",
+                "unit": "dBµV/m",
+            },
+            "dbm": {
+                "image": img_dbm_b64,
+                "colorbar": colorbar_dbm_b64,
+                "label": "Potência recebida [dBm]",
+                "unit": "dBm",
+            },
+        }
+        scale_payload = {
+            "default_unit": "dbuv",
+            "min": min_val,
+            "max": max_val,
+            "units": {
+                "dbuv": {"min": min_val, "max": max_val},
+                "dbm": {"min": power_min, "max": power_max},
+            },
+        }
+
+    signal_level_dict = {}
+    signal_level_dict_dbm = {}
+    for i, lat_val in enumerate(lats_deg):
+        for j, lon_val in enumerate(lons_deg):
+            if not inrange_mask[i, j]:
+                continue
+            if np.isfinite(E_dbuv[i, j]):
+                signal_level_dict[f"({lat_val}, {lon_val})"] = float(E_dbuv[i, j])
+            if np.isfinite(Prx_dbm[i, j]):
+                signal_level_dict_dbm[f"({lat_val}, {lon_val})"] = float(Prx_dbm[i, j])
+
+    payload = {
+        "images": images_payload,
+        "bounds": bounds,
+        "colorbar_bounds": colorbar_bounds,
+        "scale": scale_payload,
+        "center": {"lat": float(lat_tx_deg), "lng": float(lon_tx_deg)},
+        "requested_radius_km": radius_km,
+        "radius": data.get('radius', radius_km),
+        "location_status": getattr(tx, 'location_status', None),
+        "tx_location_name": getattr(tx, 'tx_location_name', None),
+        "tx_site_elevation": getattr(tx, 'tx_site_elevation', None),
+        "antenna_direction": getattr(tx, 'antenna_direction', None),
+        "tx_parameters": {
+            "power_w": getattr(tx, 'transmission_power', None),
+            "tower_height_m": getattr(tx, 'tower_height', None),
+            "rx_height_m": getattr(tx, 'rx_height', None),
+            "total_loss_db": getattr(tx, 'total_loss', None),
+            "antenna_gain_dbi": getattr(tx, 'antenna_gain', None),
+        },
+        "gain_components": {
+            "base_gain_dbi": float(Gtx_peak_dBi),
+            "horizontal_adjustment_db_min": 0.0,
+            "horizontal_adjustment_db_max": 0.0,
+            "vertical_adjustment_db": 0.0,
+            "horizontal_pattern_db": None,
+            "vertical_pattern_db": None,
+            "vertical_horizon_db": None,
+        },
+        "loss_components": loss_components_summary,
+        "center_metrics": center_metrics,
+        "signal_level_dict": signal_level_dict,
+        "signal_level_dict_dbm": signal_level_dict_dbm,
+        "rt3dDiagnostics": penalty_meta.get('diagnostics'),
+        "rt3dSettings": {
+            "building_source": building_source,
+            "ray_step_m": ray_step_m,
+            "diffraction_boost_db": diffraction_boost_db,
+            "minimum_clearance_m": minimum_clearance_m,
+        },
+    }
+    if penalty_meta.get('rays'):
+        payload['rt3dRays'] = penalty_meta['rays']
+
+    if label is not None:
+        payload["label"] = str(label)
+
+    return payload
+
+
 def _persist_coverage_artifacts(user, project, engine_value, request_payload, coverage_payload):
     if project is None:
         return None
@@ -2530,11 +3510,18 @@ def _persist_coverage_artifacts(user, project, engine_value, request_payload, co
             return b''
         return base64.b64decode(data_str)
 
-    img_dbuv_b64 = coverage_payload.get('images', {}).get('dbuv', {}).get('image')
-    colorbar_b64 = coverage_payload.get('images', {}).get('dbuv', {}).get('colorbar')
+    images_payload = coverage_payload.get('images') or {}
+    selected_image = None
+    selected_unit = None
+    for unit in ('rt3d', 'dbuv', 'dbm'):
+        entry = images_payload.get(unit)
+        if entry and entry.get('image'):
+            selected_image = entry
+            selected_unit = unit
+            break
 
-    heatmap_bytes = _decode_image_b64(img_dbuv_b64)
-    colorbar_bytes = _decode_image_b64(colorbar_b64)
+    heatmap_bytes = _decode_image_b64(selected_image.get('image') if selected_image else None)
+    colorbar_bytes = _decode_image_b64(selected_image.get('colorbar') if selected_image else None)
 
     heatmap_path = coverage_dir / f"{base_name}_field.png"
     colorbar_path = coverage_dir / f"{base_name}_colorbar.png"
@@ -2569,7 +3556,15 @@ def _persist_coverage_artifacts(user, project, engine_value, request_payload, co
         "tx_site_elevation": coverage_payload.get('tx_site_elevation'),
         "tx_parameters": _clean_json(coverage_payload.get('tx_parameters')),
         "receivers": _clean_json(receivers_payload),
+        "rt3d_scene": _clean_json(coverage_payload.get('rt3dScene')),
+        "rt3d_diagnostics": _clean_json(coverage_payload.get('rt3dDiagnostics')),
+        "rt3d_rays": _clean_json(coverage_payload.get('rt3dRays')),
+        "rt3d_settings": _clean_json(coverage_payload.get('rt3dSettings')),
     }
+    if coverage_payload.get('rt3dScene'):
+        summary_payload["rt3d_scene"] = _clean_json(coverage_payload.get('rt3dScene'))
+    if coverage_payload.get('rt3dDiagnostics'):
+        summary_payload["rt3d_diagnostics"] = _clean_json(coverage_payload.get('rt3dDiagnostics'))
     heatmap_asset = Asset(
         project_id=project.id,
         type=AssetType.heatmap,
@@ -2579,7 +3574,8 @@ def _persist_coverage_artifacts(user, project, engine_value, request_payload, co
         meta={
             "engine": engine_enum.value,
             "generated_at": timestamp_iso,
-            "unit": coverage_payload.get('images', {}).get('dbuv', {}).get('unit'),
+            "unit": selected_image.get('unit') if selected_image else None,
+            "label": selected_image.get('label') if selected_image else None,
             "radius_km": coverage_payload.get('requested_radius_km'),
         },
     )
@@ -2609,7 +3605,7 @@ def _persist_coverage_artifacts(user, project, engine_value, request_payload, co
             meta={
                 "engine": engine_enum.value,
                 "generated_at": timestamp_iso,
-                "label": coverage_payload.get('images', {}).get('dbuv', {}).get('label'),
+                "label": selected_image.get('label') if selected_image else None,
             },
         )
         db.session.add(colorbar_asset)
@@ -2620,6 +3616,7 @@ def _persist_coverage_artifacts(user, project, engine_value, request_payload, co
         "asset_id": str(heatmap_asset.id),
         "asset_path": heatmap_asset.path,
         "json_asset_id": str(json_asset.id),
+        "image_unit": selected_unit,
     })
     if colorbar_asset:
         summary_payload["colorbar_asset_id"] = str(colorbar_asset.id)
@@ -2670,6 +3667,14 @@ def _persist_coverage_artifacts(user, project, engine_value, request_payload, co
     }
     if colorbar_asset:
         last_coverage["colorbar_asset_id"] = str(colorbar_asset.id)
+    if coverage_payload.get('rt3dScene'):
+        last_coverage["rt3d_scene"] = _clean_json(coverage_payload.get('rt3dScene'))
+    if coverage_payload.get('rt3dDiagnostics'):
+        last_coverage["rt3d_diagnostics"] = _clean_json(coverage_payload.get('rt3dDiagnostics'))
+    if coverage_payload.get('rt3dRays'):
+        last_coverage["rt3d_rays"] = _clean_json(coverage_payload.get('rt3dRays'))
+    if coverage_payload.get('rt3dSettings'):
+        last_coverage["rt3d_settings"] = _clean_json(coverage_payload.get('rt3dSettings'))
 
     updated_settings['lastCoverage'] = last_coverage
     project.settings = updated_settings
@@ -2745,7 +3750,65 @@ def _latest_coverage_snapshot(project: Project | None):
     summary.setdefault('receivers', summary.get('receivers') or [])
 
     return summary
-def _compute_coverage_map(tx, data, include_arrays=False, label=None, dem_directory=None):
+
+
+@bp.route('/projects/<slug>/rt3d-scene.geojson')
+@login_required
+def download_rt3d_scene(slug):
+    project = project_by_slug_or_404(slug, current_user.uuid)
+    snapshot = _latest_coverage_snapshot(project) or {}
+    scene_meta = snapshot.get('rt3d_scene') or {}
+    asset_path = scene_meta.get('asset_path')
+    if not asset_path:
+        return jsonify({'error': 'Nenhuma cena RT3D disponível para este projeto.'}), 404
+    full_path = storage_root() / asset_path
+    if not full_path.exists():
+        return jsonify({'error': 'Arquivo de cena RT3D não encontrado.'}), 404
+    return send_file(full_path, mimetype='application/geo+json', as_attachment=False)
+
+
+@bp.route('/projects/<slug>/rt3d-data')
+@login_required
+def rt3d_data(slug):
+    project = project_by_slug_or_404(slug, current_user.uuid)
+    snapshot = _latest_coverage_snapshot(project) or {}
+    if not snapshot.get('rt3d_scene'):
+        return jsonify({'error': 'Nenhuma cena RT3D disponível para este projeto.'}), 404
+
+    scene_url = url_for('ui.download_rt3d_scene', slug=project.slug)
+    return jsonify({
+        'scene_url': scene_url,
+        'settings': snapshot.get('rt3d_settings') or {},
+        'diagnostics': snapshot.get('rt3d_diagnostics') or {},
+        'rays': snapshot.get('rt3d_rays') or [],
+        'project': {
+            'slug': project.slug,
+            'name': project.name,
+        },
+    })
+
+
+@bp.route('/rt3d-viewer')
+@login_required
+def rt3d_viewer():
+    slug = request.args.get('project')
+    if not slug:
+        flash('Selecione um projeto para visualizar em 3D.', 'warning')
+        return redirect(url_for('ui.calcular_cobertura'))
+    project = project_by_slug_or_404(slug, current_user.uuid)
+    snapshot = _latest_coverage_snapshot(project)
+    if not snapshot or not snapshot.get('rt3d_scene'):
+        flash('Este projeto ainda não possui cena RT3D.', 'warning')
+        return redirect(url_for('ui.calcular_cobertura', project=project.slug))
+    cesium_token = current_app.config.get('CESIUM_ION_TOKEN')
+    return render_template(
+        'rt3d_viewer.html',
+        project=project,
+        cesium_token=cesium_token,
+        scene_endpoint=url_for('ui.download_rt3d_scene', slug=project.slug),
+        data_endpoint=url_for('ui.rt3d_data', slug=project.slug),
+    )
+def _compute_coverage_map(tx, data, include_arrays=False, label=None, dem_directory=None, rt3d_scene=None):
     """
     Gera todos os artefatos de cobertura (heatmap, barra de cores, metadados)
     em formato compatível com mapa.js / generateCoverage() / applyCoverageOverlay().
@@ -2753,6 +3816,9 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None, dem_direct
     tx   -> objeto "transmissor" (ex: current_user)
     data -> payload JSON vindo do front (radius, min/max escala, customCenter ...)
     """
+
+    if data.get('coverageEngine') == CoverageEngine.rt3d.value:
+        return _compute_rt3d_only_map(tx, data, include_arrays, label, rt3d_scene)
 
     # -------------------------------------------------
     # helpers internos
@@ -3114,6 +4180,8 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None, dem_direct
     else:
         dlat = 0.0
 
+    lon_grid, lat_grid = np.meshgrid(lons_deg, lats_deg)
+
     # -------------------------------------------------
     # 5. PADRÃO DE ANTENA / CORREÇÃO DE ORIENTAÇÃO (+90°)
     # -------------------------------------------------
@@ -3199,7 +4267,6 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None, dem_direct
     #    IMPORTANTE: o círculo é em torno da TX REAL (lat_tx_deg/lon_tx_deg),
     #    não do centro ajustado.
     # -------------------------------------------------
-    lon_grid, lat_grid = np.meshgrid(lons_deg, lats_deg)
 
     def _haversine_km(lat1, lon1, lat2, lon2):
         R = 6371.0  # km
@@ -3385,6 +4452,30 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None, dem_direct
         colorbar_label='Potência recebida [dBm]'
     )
 
+    images_payload = {
+        "dbuv": {
+            "image": img_dbuv_b64,
+            "colorbar": colorbar_dbuv_b64,
+            "label": "Campo elétrico [dBµV/m]",
+            "unit": "dBµV/m",
+        },
+        "dbm": {
+            "image": img_dbm_b64,
+            "colorbar": colorbar_dbm_b64,
+            "label": "Potência recebida [dBm]",
+            "unit": "dBm",
+        },
+    }
+    scale_payload = {
+        "default_unit": "dbuv",
+        "min": min_val,
+        "max": max_val,
+        "units": {
+            "dbuv": {"min": min_val, "max": max_val},
+            "dbm": {"min": power_min, "max": power_max},
+        },
+    }
+
     # -------------------------------------------------
     # 13. DICIONÁRIOS DE NÍVEL DE CAMPO (p/ clique RX)
     # -------------------------------------------------
@@ -3437,35 +4528,14 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None, dem_direct
     # 15. OBJETO FINAL (compatível com mapa.js)
     # -------------------------------------------------
     payload = {
-        "images": {
-            "dbuv": {
-                "image": img_dbuv_b64,
-                "colorbar": colorbar_dbuv_b64,
-                "label": "Campo elétrico [dBµV/m]",
-                "unit": "dBµV/m",
-            },
-            "dbm": {
-                "image": img_dbm_b64,
-                "colorbar": colorbar_dbm_b64,
-                "label": "Potência recebida [dBm]",
-                "unit": "dBm",
-            },
-        },
+        "images": images_payload,
 
         # bounds agora vêm da malha calculada em torno do centro AJUSTADO
         # (ou seja, já com o deslocamento empírico por raio)
         "bounds": bounds,
         "colorbar_bounds": colorbar_bounds,
 
-        "scale": {
-            "default_unit": "dbuv",
-            "min": min_val,
-            "max": max_val,
-            "units": {
-                "dbuv": {"min": min_val, "max": max_val},
-                "dbm": {"min": power_min, "max": power_max},
-            },
-        },
+        "scale": scale_payload,
 
         # AQUI mandamos a posição REAL da TX (marcador vermelho),
         # pra desenhar o círculo azul e pra atualizar o painel.
@@ -3567,6 +4637,16 @@ def calculate_coverage():
             project_overrides["latitude"] = settings["latitude"]
         if "longitude" in settings:
             project_overrides["longitude"] = settings["longitude"]
+        if "rt3dUrbanRadius" in settings:
+            project_overrides["rt3dUrbanRadius"] = settings["rt3dUrbanRadius"]
+        if "rt3dBuildingSource" in settings:
+            project_overrides["rt3dBuildingSource"] = settings["rt3dBuildingSource"]
+        if "rt3dRayStep" in settings:
+            project_overrides["rt3dRayStep"] = settings["rt3dRayStep"]
+        if "rt3dDiffractionBoost" in settings:
+            project_overrides["rt3dDiffractionBoost"] = settings["rt3dDiffractionBoost"]
+        if "rt3dMinimumClearance" in settings:
+            project_overrides["rt3dMinimumClearance"] = settings["rt3dMinimumClearance"]
 
     # Prepare overrides from request data (real-time UI changes)
     request_overrides = {}
@@ -3606,6 +4686,14 @@ def calculate_coverage():
         request_overrides["propagation_model"] = _coerce_str(data["propagation_model"])
     if "service" in data:
         request_overrides["servico"] = _coerce_str(data["service"])
+    if "rt3dBuildingSource" in data:
+        request_overrides["rt3dBuildingSource"] = _coerce_str(data["rt3dBuildingSource"])
+    if "rt3dRayStep" in data:
+        request_overrides["rt3dRayStep"] = _coerce_float(data["rt3dRayStep"])
+    if "rt3dDiffractionBoost" in data:
+        request_overrides["rt3dDiffractionBoost"] = _coerce_float(data["rt3dDiffractionBoost"])
+    if "rt3dMinimumClearance" in data:
+        request_overrides["rt3dMinimumClearance"] = _coerce_float(data["rt3dMinimumClearance"])
 
     # Combine overrides: request_overrides take precedence over project_overrides
     # which take precedence over current_user defaults.
@@ -3615,22 +4703,39 @@ def calculate_coverage():
     tx_object = _prepare_tx_object(current_user, overrides=all_overrides)
 
     dataset_summary = {}
+    rt3d_scene_summary = None
     if project and tx_object.latitude is not None and tx_object.longitude is not None:
-        try:
-            dataset_summary = ensure_geodata_availability(
-                project,
-                tx_object.latitude,
-                tx_object.longitude,
-                data.get('lulcYear'),
-            )
-        except Exception as exc:
-            current_app.logger.warning('Falha ao preparar datasets base: %s', exc)
-            dataset_summary = {}
+        if engine_value != CoverageEngine.rt3d.value:
+            try:
+                dataset_summary = ensure_geodata_availability(
+                    project,
+                    tx_object.latitude,
+                    tx_object.longitude,
+                    data.get('lulcYear'),
+                )
+            except Exception as exc:
+                current_app.logger.warning('Falha ao preparar datasets base: %s', exc)
+                dataset_summary = {}
+        if engine_value == CoverageEngine.rt3d.value:
+            try:
+                rt3d_radius = _coerce_float(data.get('rt3dUrbanRadius'))
+                if rt3d_radius is None:
+                    rt3d_radius = max(_coerce_float(data.get('radius')) or 6.0, 1.0)
+                rt3d_scene_summary = ensure_rt3d_scene(
+                    project,
+                    tx_object.latitude,
+                    tx_object.longitude,
+                    rt3d_radius,
+                    current_app.config.get('GOOGLE_MAPS_API_KEY'),
+                )
+            except Exception as exc:
+                current_app.logger.warning('rt3d.scene.failure', extra={'error': str(exc)})
+                rt3d_scene_summary = None
 
     dem_directory = dataset_summary.get('dem_dir') if dataset_summary else None
-    result = _compute_coverage_map(tx_object, data, dem_directory=dem_directory)
+    result = _compute_coverage_map(tx_object, data, dem_directory=dem_directory, rt3d_scene=rt3d_scene_summary)
+    status_payload = result.get('datasetStatus') or {}
     if dataset_summary:
-        status_payload = {}
         dem_asset = dataset_summary.get('dem_asset')
         if dem_asset is not None:
             meta = dem_asset.meta or {}
@@ -3646,8 +4751,24 @@ def calculate_coverage():
             status_payload['lulcSource'] = meta.get('source')
         elif dataset_summary.get('lulc_year') is not None:
             status_payload['lulcYear'] = dataset_summary['lulc_year']
-        if status_payload:
-            result['datasetStatus'] = status_payload
+    if rt3d_scene_summary:
+        status_payload['buildingsSource'] = rt3d_scene_summary.get('source')
+        status_payload['buildingsCount'] = rt3d_scene_summary.get('feature_count')
+        result['rt3dScene'] = rt3d_scene_summary
+        if rt3d_scene_summary.get('diagnostics'):
+            existing_diag = result.get('rt3dDiagnostics') or {}
+            merged_diag = dict(existing_diag)
+            merged_diag.update(rt3d_scene_summary['diagnostics'])
+            result['rt3dDiagnostics'] = merged_diag
+        if result.get('rt3dSettings') is None and tx_object:
+            result['rt3dSettings'] = {
+                'building_source': getattr(tx_object, 'rt3dBuildingSource', None),
+                'ray_step_m': getattr(tx_object, 'rt3dRayStep', None),
+                'diffraction_boost_db': getattr(tx_object, 'rt3dDiffractionBoost', None),
+                'minimum_clearance_m': getattr(tx_object, 'rt3dMinimumClearance', None),
+            }
+    if status_payload:
+        result['datasetStatus'] = status_payload
 
     result['receivers'] = receivers
     if project:
