@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timedelta
 from math import radians, cos, sin, asin, sqrt, degrees
 from pathlib import Path
-
+from typing import Iterable
 import astropy
 import geojson
 import matplotlib
@@ -65,6 +65,7 @@ from app_core.models import (
 )
 from app_core.email_utils import generate_token, load_token, send_email
 from app_core.storage import ensure_storage_structure, storage_root
+from app_core.reporting.service import generate_analysis_report, AnalysisReportError
 from app_core.data_acquisition import ensure_geodata_availability, ensure_rt3d_scene, global_srtm_dir
 from app_core.utils import (
     ensure_unique_slug,
@@ -798,69 +799,94 @@ def calculos_rf():
 @bp.route('/gerar-relatorio', methods=['GET'])
 @login_required
 def download_report():
+    project_slug = request.args.get('project')
+    project = None
+    if project_slug:
+        project = project_by_slug_or_404(project_slug, current_user.uuid)
+    else:
+        project = (
+            current_user.projects.order_by(Project.created_at.desc()).first()
+            if hasattr(current_user, "projects")
+            else None
+        )
+
+    if project:
+        try:
+            report_entry = generate_analysis_report(project)
+            asset = Asset.query.filter_by(id=report_entry.pdf_asset_id).first()
+            if asset:
+                pdf_path = storage_root() / asset.path
+                if pdf_path.exists():
+                    filename = f"relatorio_{project.slug}.pdf"
+                    return send_file(pdf_path, as_attachment=True, download_name=filename, mimetype='application/pdf')
+            raise AnalysisReportError("Falha ao localizar o PDF gerado.")
+        except AnalysisReportError as exc:
+            current_app.logger.warning(
+                "analysis_report.failure",
+                extra={"project": project.slug if project else "sem-projeto", "error": str(exc)},
+            )
+            return str(exc), 400
+
+    buffer = _build_user_snapshot_pdf(current_user)
+    return send_file(buffer, as_attachment=True, download_name='relatorio_usuario.pdf', mimetype='application/pdf')
+
+
+def _build_user_snapshot_pdf(user: User) -> io.BytesIO:
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=letter)
     width, height = letter
+    y = height - 50
 
-    def add_text(text, y_offset=20):
-        nonlocal y_position
-        c.drawString(50, y_position, text)
-        y_position -= y_offset
+    c.setFont('Helvetica-Bold', 16)
+    c.drawString(40, y, f"Resumo do usuário — {user.username}")
+    y -= 30
+    c.setFont('Helvetica', 11)
 
-    def add_image(image_data, y_offset=200, image_width=600):
-        nonlocal y_position
-        if image_data:
-            image_stream = io.BytesIO(image_data)
-            try:
-                img = Image.open(image_stream)
-                img_reader = ImageReader(img)
-                aspect_ratio = img.width / img.height
-                image_height = image_width / aspect_ratio
-
-                image_x = (width - image_width) / 2
-                image_y = y_position - image_height - 20
-
-                if image_y < 50:
-                    c.showPage()
-                    y_position = height - 50
-                    image_y = y_position - image_height - 20
-
-                c.drawImage(img_reader, image_x, image_y, width=image_width, height=image_height,
-                            preserveAspectRatio=True, mask='auto')
-                y_position = image_y - 10
-            except Exception as e:
-                print(f"Erro ao adicionar imagem: {e}")
-            finally:
-                image_stream.close()
-
-    user = current_user
-    y_position = height - 50
-
-    fields = [
-        f"Frequência: {user.frequencia} MHz",
-        f"Altura do centro de fase da antena: {user.tower_height} m",
-        f"Total de Perdas: {user.total_loss} dB",
-        f"Potência de Transmissão: {user.transmission_power} Watts",
-        f"Ganho da Antena: {user.antenna_gain} dBi",
-        f"Direção da Antena: {user.antenna_direction}°",
-        f"Tilt Elétrico: {user.antenna_tilt}°",
-        f"Latitude: {user.latitude}",
-        f"Longitude: {user.longitude}",
-        f"Serviço: {user.servico}",
-        f"Notas: {user.notes or 'Nenhuma nota disponível.'}"
+    details = [
+        f"Frequência: {user.frequencia or '—'} MHz",
+        f"Potência de Transmissão: {user.transmission_power or '—'} W",
+        f"Ganho da Antena: {user.antenna_gain or '—'} dBi",
+        f"Perdas do sistema: {user.total_loss or '—'} dB",
+        f"Direção/Tilt: {user.antenna_direction or '—'}° / {user.antenna_tilt or '—'}°",
+        f"Coordenadas: {user.latitude or '—'}, {user.longitude or '—'}",
+        f"Serviço: {user.servico or '—'}",
+        f"Notas: {user.notes or 'Sem observações.'}",
     ]
-    for field in fields:
-        add_text(field, 15)
+    for line in details:
+        c.drawString(40, y, line)
+        y -= 16
 
-    add_image(user.antenna_pattern_img_dia_H, 100)
-    add_image(user.antenna_pattern_img_dia_V, 100)
-    add_image(user.cobertura_img, 100)
-    add_image(user.perfil_img, 100)
-
+    image_slots: Iterable[tuple[str, bytes | None]] = [
+        ("Perfil de enlace", user.perfil_img),
+        ("Cobertura histórica", user.cobertura_img),
+        ("Diagrama Horizontal", user.antenna_pattern_img_dia_H),
+        ("Diagrama Vertical", user.antenna_pattern_img_dia_V),
+    ]
+    x_offset = 40
+    y_block = y - 10
+    for label, blob in image_slots:
+        if not blob:
+            continue
+        if y_block < 200:
+            c.showPage()
+            y_block = height - 120
+            x_offset = 40
+        c.setFont('Helvetica-Bold', 10)
+        c.drawString(x_offset, y_block, label)
+        try:
+            reader = ImageReader(io.BytesIO(blob))
+            c.drawImage(reader, x_offset, y_block - 110, width=160, height=110, preserveAspectRatio=True, mask='auto')
+        except Exception:
+            c.setFont('Helvetica-Oblique', 9)
+            c.drawString(x_offset, y_block - 12, "Imagem indisponível.")
+        x_offset += 180
+        if x_offset > width - 160:
+            x_offset = 40
+            y_block -= 140
     c.showPage()
     c.save()
     buffer.seek(0)
-    return send_file(buffer, as_attachment=True, download_name='relatorio.pdf', mimetype='application/pdf')
+    return buffer
 
 @bp.route('/calculate-distance', methods=['POST'])
 def calculate_distance():
@@ -1423,7 +1449,6 @@ def home():
     project_actions.append({'label': 'Planejar cobertura', 'description': 'Atualize parâmetros e gere novas manchas.', 'url': coverage_url, 'variant': 'brand'})
     project_actions.append({'label': 'Abrir mapa & receptores', 'description': 'Visualize a última mancha em campo e gerencie receptores.', 'url': mapa_url})
     project_actions.append({'label': 'Dados e artefatos', 'description': 'Revise imagens, perfis e notas consolidadas.', 'url': dados_url})
-    project_actions.append({'label': 'Gerar relatório PDF', 'description': 'Exporta parâmetros e imagens do estudo em um único documento.', 'url': url_for('ui.download_report')})
 
     rt3d_panel = []
     if isinstance(rt3d_diagnostics, dict):
@@ -2020,9 +2045,11 @@ def gerar_img_perfil():
 
     srtm_dir = str(global_srtm_dir())
     if project:
-        summary_tx = ensure_geodata_availability(project, start_coords['lat'], start_coords['lng'], fetch_lulc=False)
-        summary_rx = ensure_geodata_availability(project, end_coords['lat'], end_coords['lng'], fetch_lulc=False)
-        srtm_dir = (summary_rx.get('dem_dir') or summary_tx.get('dem_dir')) or srtm_dir
+        summary_tx = ensure_geodata_availability(project, start_coords['lat'], start_coords['lng'], fetch_lulc=False) or {}
+        summary_rx = ensure_geodata_availability(project, end_coords['lat'], end_coords['lng'], fetch_lulc=False) or {}
+        dem_tx = summary_tx.get('dem_dir')
+        dem_rx = summary_rx.get('dem_dir')
+        srtm_dir = (dem_rx or dem_tx) or srtm_dir
     message_payload = None
     google_profile = _google_elevation_profile(tx_coords, rx_coords, samples=256)
     if google_profile:

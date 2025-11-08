@@ -91,6 +91,14 @@
                 {% endfor %}
                 <a class="btn btn-outline-secondary" href="{{ projects_list_url }}">Projetos</a>
                 {% if selected_project %}
+                    <button class="btn btn-outline-secondary d-flex align-items-center" id="btnSimpleReport" data-project="{{ selected_project.slug }}">
+                        <span class="spinner-border spinner-border-sm me-2 d-none" id="simpleReportSpinner" role="status" aria-hidden="true"></span>
+                        Baixar Relatório PDF
+                    </button>
+                    <button class="btn btn-outline-success d-flex align-items-center" id="btnAnalysisReport" data-project="{{ selected_project.slug }}">
+                        <span class="spinner-border spinner-border-sm me-2 d-none" id="analysisReportSpinner" role="status" aria-hidden="true"></span>
+                        Relatório de Análise
+                    </button>
                     <button class="btn btn-outline-warning d-flex align-items-center" id="btnRegReport" data-project="{{ selected_project.slug }}">
                         <span class="spinner-border spinner-border-sm me-2 d-none" id="regReportSpinner" role="status" aria-hidden="true"></span>
                         Relatório ANATEL
@@ -509,10 +517,81 @@ async function generateRegReport(button) {
     }
 }
 
+async function generateAnalysisReport(button) {
+    const slug = button?.dataset?.project;
+    if (!slug) return;
+    const spinner = document.getElementById('analysisReportSpinner');
+    button.disabled = true;
+    if (spinner) spinner.classList.remove('d-none');
+    try {
+        const response = await fetch('/api/reports/analysis', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ project: slug }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || 'Erro ao gerar relatório de análise.');
+        }
+        const link = data.download_url ? `<a href=\"${data.download_url}\" class=\"text-white text-decoration-underline ms-2\" target=\"_blank\">Abrir PDF</a>` : '';
+        showToast(`Relatório de análise pronto.${link}`, 'success');
+    } catch (error) {
+        showToast(error.message || 'Falha ao gerar relatório de análise.', 'danger');
+    } finally {
+        if (spinner) spinner.classList.add('d-none');
+        button.disabled = false;
+    }
+}
+
+async function downloadSimpleReport(button) {
+    const slug = button?.dataset?.project;
+    const spinner = document.getElementById('simpleReportSpinner');
+    button.disabled = true;
+    if (spinner) spinner.classList.remove('d-none');
+    try {
+        const url = slug ? `/gerar-relatorio?project=${encodeURIComponent(slug)}` : '/gerar-relatorio';
+        const response = await fetch(url, { credentials: 'same-origin' });
+        if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || 'Falha ao gerar relatório.');
+        }
+        const blob = await response.blob();
+        const contentDisposition = response.headers.get('Content-Disposition') || '';
+        let filename = 'relatorio.pdf';
+        const match = contentDisposition.match(/filename="?([^\";]+)"?/i);
+        if (match) filename = match[1];
+        const downloadUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = downloadUrl;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        setTimeout(() => {
+            URL.revokeObjectURL(downloadUrl);
+            document.body.removeChild(link);
+        }, 2000);
+        showToast('Relatório baixado com sucesso.', 'success');
+    } catch (error) {
+        showToast(error.message || 'Erro ao baixar o relatório.', 'danger');
+    } finally {
+        if (spinner) spinner.classList.add('d-none');
+        button.disabled = false;
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     const regBtn = document.getElementById('btnRegReport');
     if (regBtn) {
         regBtn.addEventListener('click', () => generateRegReport(regBtn));
+    }
+    const analysisBtn = document.getElementById('btnAnalysisReport');
+    if (analysisBtn) {
+        analysisBtn.addEventListener('click', () => generateAnalysisReport(analysisBtn));
+    }
+    const simpleBtn = document.getElementById('btnSimpleReport');
+    if (simpleBtn) {
+        simpleBtn.addEventListener('click', () => downloadSimpleReport(simpleBtn));
     }
 });
 </script>

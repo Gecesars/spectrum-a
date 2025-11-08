@@ -58,6 +58,8 @@ def create_app():
     app.config['MAIL_SUPPRESS_SEND'] = _env_bool('MAIL_SUPPRESS_SEND', False)
 
     app.config['GOOGLE_MAPS_API_KEY'] = os.environ.get('GOOGLE_MAPS_API_KEY')
+    app.config['GEMINI_API_KEY'] = os.environ.get('GEMINI_API_KEY')
+    app.config['GEMINI_MODEL'] = os.environ.get('GEMINI_MODEL', 'gemini-2.5-flash')
     app.config.setdefault(
         'SOLID_PNG_ROOT',
         os.path.join(STATIC_DIR, 'SOLID_PRT_ASM', 'PNGS'),
@@ -84,6 +86,8 @@ def create_app():
     app.register_blueprint(projects_api_bp)
     from app_core.regulatory.api import bp as regulator_api_bp
     app.register_blueprint(regulator_api_bp)
+    from app_core.reporting.api import bp as reporting_api_bp
+    app.register_blueprint(reporting_api_bp)
 
     @app.context_processor
     def inject_defaults():
