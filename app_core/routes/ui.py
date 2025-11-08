@@ -1615,11 +1615,9 @@ def gerar_img_perfil():
         summary_tx = ensure_geodata_availability(project, start_coords['lat'], start_coords['lng'], fetch_lulc=False)
         summary_rx = ensure_geodata_availability(project, end_coords['lat'], end_coords['lng'], fetch_lulc=False)
         srtm_dir = (summary_rx.get('dem_dir') or summary_tx.get('dem_dir')) or srtm_dir
-    using_google_profile = False
     message_payload = None
     google_profile = _google_elevation_profile(tx_coords, rx_coords, samples=256)
     if google_profile:
-        using_google_profile = True
         current_app.logger.info(
             'elevation.profile.using_google',
             extra={
@@ -1631,6 +1629,16 @@ def gerar_img_perfil():
         total_distance = google_profile['distance_m']
         sample_count = len(elevations)
         distance_samples = np.linspace(0.0, total_distance, sample_count)
+        # Ajusta o perfil para coincidir com o solo da torre RX/TX medido via SRTM
+        tx_ground = _compute_site_elevation(tx_coords['lat'], tx_coords['lng'])
+        rx_ground = _compute_site_elevation(rx_coords['lat'], rx_coords['lng'])
+        if tx_ground is not None or rx_ground is not None:
+            start_target = tx_ground if tx_ground is not None else elevations[0]
+            end_target = rx_ground if rx_ground is not None else elevations[-1]
+            start_delta = start_target - elevations[0]
+            end_delta = end_target - elevations[-1]
+            adjustments = np.linspace(start_delta, end_delta, sample_count)
+            elevations = elevations + adjustments
         distances = (distance_samples * u.m)
         heights = (elevations * u.m)
         longitudes = np.array(google_profile['longitudes'])
@@ -1682,34 +1690,43 @@ def gerar_img_perfil():
     # distância total TX→RX
     rx_position_km = distances.to(u.km)[-1].value
 
-    if using_google_profile:
-        Lb_corr = _estimate_fspl_loss(freq_mhz_user, rx_position_km)
-        results = None
-    else:
-        results = pathprof.losses_complete(
-            frequency,
-            temperature,
-            pressure,
-            lon_tx, lat_tx,
-            lon_rx, lat_rx,
-            h_tg, h_rg,
-            1 * u.m,
-            time_percent,
-            zone_t=zone_t,
-            zone_r=zone_r,
-        )
-        _Lb_corr_obj = results.get('L_b_corr', None)
-        if _Lb_corr_obj is None:
-            _Lb_corr_obj = results.get('L_b', None)
+    def _compute_losses(mode: str):
+        with SrtmConf.set(srtm_dir=srtm_dir, download=mode, server='viewpano'):
+            return pathprof.losses_complete(
+                frequency,
+                temperature,
+                pressure,
+                lon_tx, lat_tx,
+                lon_rx, lat_rx,
+                h_tg, h_rg,
+                1 * u.m,
+                time_percent,
+                zone_t=zone_t,
+                zone_r=zone_r,
+            )
 
-        if hasattr(_Lb_corr_obj, 'value'):
-            val = _Lb_corr_obj.value
-            if isinstance(val, np.ndarray):
-                Lb_corr = float(val[0])
-            else:
-                Lb_corr = float(val)
+    results = None
+    for mode in ('none', 'missing'):
+        try:
+            results = _compute_losses(mode)
+            break
+        except Exception as exc:
+            current_app.logger.warning('losses_complete.retry', extra={'mode': mode, 'error': str(exc)})
+    if results is None:
+        raise RuntimeError('Não foi possível calcular as perdas P.452')
+
+    _Lb_corr_obj = results.get('L_b_corr', None)
+    if _Lb_corr_obj is None:
+        _Lb_corr_obj = results.get('L_b', None)
+
+    if hasattr(_Lb_corr_obj, 'value'):
+        val = _Lb_corr_obj.value
+        if isinstance(val, np.ndarray):
+            Lb_corr = float(val[0])
         else:
-            Lb_corr = float(_Lb_corr_obj)
+            Lb_corr = float(val)
+    else:
+        Lb_corr = float(_Lb_corr_obj)
 
     # potência recebida estimada em dBm no RX:
     # Prx = ERP(dBm) + G_rx(dBi) - L_path(dB)
@@ -2310,11 +2327,6 @@ def _lookup_municipality(lat, lon):
             continue
     return None
 
-
-def _estimate_fspl_loss(frequency_mhz: float, distance_km: float) -> float:
-    distance_km = max(distance_km, 0.001)
-    frequency_mhz = max(frequency_mhz, 0.1)
-    return 32.45 + 20.0 * math.log10(distance_km) + 20.0 * math.log10(frequency_mhz)
 
 
 def _google_elevation_profile(start_coords, end_coords, samples=256):
