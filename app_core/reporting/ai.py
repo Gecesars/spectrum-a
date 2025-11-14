@@ -42,6 +42,7 @@ Contexto:
 - Engine: {engine}
 - Clima: {climate} / caso não seja passado busque o clima para location
 - Notas do projeto: {project_notes}
+- Pico a pico horizontal (máximo - mínimo do diagrama): {horizontal_peak_to_peak_db} dB
 - Receptores avaliados (resumo):
 {link_summary}
 - Receptores detalhados (JSON):
@@ -66,14 +67,15 @@ Requisitos:
   Após o cálculo, insira um caractere de nova linha (use `\n`) e continue com o resumo executivo (até 7 frases) usando a ERP calculada.
 - coverage: Análise da mancha/cobertura, validando a cobertura contra a ERP calculada (Z dBW) e o {radius_km}.
 - profile: Análise do perfil de enlace. A ERP 'A' (em dBm) calculada no 'overview' é a única fonte de verdade. Se a imagem ou texto do perfil (ex: 'ERP na direção') mostrar um valor de ERP diferente, aponte isso como uma *inconsistência* nos dados de simulação.
-- pattern_horizontal: Análise da imagem do diagrama horizontal. Comente sobre a direcionalidade azimutal (se é omnidirecional, quasi-omnidirecional ou direcional) com base na forma do diagrama. Comente se esta direcionalidade está alinhada às {project_notes}.
+- pattern_horizontal: Análise da imagem do diagrama horizontal. Utilize sempre o valor pico a pico ({horizontal_peak_to_peak_db} dB) para classificar (ex.: <6 dB = omni, 6–12 dB = quasi‑omni, >12 dB = direcional). Se a imagem contrariar o valor, explique a divergência. Comente se esta direcionalidade está alinhada às {project_notes}.
 - pattern_vertical: comentários sobre tilt/elevação/ nulos e lobulos.
-- recommendations: lista com 3 ou mais recomendações objetivas.
+- recommendations: lista com, no mínimo, 3 recomendações objetivas.
 - conclusion: parecer final considerando as notas do projeto, a ERP calculada (Z dBW / A dBm), e a direcionalidade (conforme 'pattern_horizontal').
-- link_analyses: para cada receptor listado no JSON {link_payload}:
+- link_analyses: para cada receptor listado no JSON {link_payload} (mesmo se faltarem dados):
   1. Forneça uma análise específica (distância, campo, potência).
   2. Verifique se os níveis de sinal são coerentes com a ERP 'A' (em dBm) calculada.
   3. **Crucial:** Compare o campo/potência do receptor (listado em {link_payload}) com qualquer valor de campo/potência estimado na análise do 'profile' (se disponível para esse receptor) e aponte explicitamente qualquer discrepância (ex: "Campo no perfil é 70.8 dBµV/m, mas no receptor é 63.3 dBµV/m").
+- Caso não haja perfil/imagem para um receptor, explicite "Dados indisponíveis" mas mantenha a entrada no array.
 - Ao comentar os diagramas horizontal/vertical, cite se o sistema é omni ou direcional com base na análise visual da imagem.
 - Utilize o resumo de receptores para avaliar cada enlace no campo profile/conclusion, apontando discrepâncias de campo/potência.
 Caso alguma imagem não esteja disponível, informe explicitamente que a análise ficou limitada.
@@ -131,6 +133,7 @@ def build_ai_summary(
         engine=snapshot.get("engine") or "—",
         climate=metrics.get("climate") or "Não informado",
         project_notes=metrics.get("project_notes") or "Sem notas registradas.",
+        horizontal_peak_to_peak_db=metrics.get("horizontal_peak_to_peak_db") or "—",
        # horizontal_peak_to_peak_db=metrics.get("horizontal_peak_to_peak_db") or "—",
         link_summary=metrics.get("link_summary") or "Nenhum receptor cadastrado.",
         link_payload=links_json,

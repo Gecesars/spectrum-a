@@ -1940,6 +1940,64 @@ def adjust_center_for_coverage(lon_center, lat_center, radius_km):
     northern_point = geodesic(kilometers=radius_km).destination(original_location, bearing=0)
     return northern_point.longitude, northern_point.latitude
 
+def _slug_for_filename(label: str | None) -> str:
+    text = (label or 'rx').strip().lower()
+    if not text:
+        text = 'rx'
+    return slugify(text) or 'rx'
+
+
+def _persist_receiver_profile_asset(project: Project, receiver_label: str | None, image_bytes: bytes):
+    storage_dir = ensure_project_path_exists(project, 'assets', 'profiles')
+    timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+    slug = _slug_for_filename(receiver_label)
+    filename = f"{slug}_{timestamp}.png"
+    file_path = storage_dir / filename
+    file_path.write_bytes(image_bytes)
+    rel_path = file_path.relative_to(storage_root())
+    asset = Asset(
+        project_id=project.id,
+        type=AssetType.png,
+        path=str(rel_path),
+        mime_type='image/png',
+        byte_size=file_path.stat().st_size,
+        meta={
+            'kind': 'receiver_profile',
+            'label': receiver_label,
+            'generated_at': datetime.utcnow().isoformat(),
+        },
+    )
+    db.session.add(asset)
+    db.session.flush()
+    return asset
+
+
+def _upsert_project_receiver(project: Project, receiver_payload: dict):
+    if project is None:
+        return
+    receiver_id = receiver_payload.get('id')
+    if not receiver_id:
+        return
+    settings = dict(project.settings or {})
+    entries = list(settings.get('receiverBookmarks') or [])
+    updated = False
+    for idx, entry in enumerate(entries):
+        if entry.get('id') == receiver_id:
+            new_entry = dict(entry)
+            new_entry.update(receiver_payload)
+            new_entry['updated_at'] = datetime.utcnow().isoformat()
+            entries[idx] = new_entry
+            updated = True
+            break
+    if not updated:
+        receiver_payload = dict(receiver_payload)
+        receiver_payload['created_at'] = datetime.utcnow().isoformat()
+        receiver_payload['updated_at'] = receiver_payload['created_at']
+        entries.append(receiver_payload)
+    settings['receiverBookmarks'] = entries
+    project.settings = settings
+
+
 def generate_coverage_image(lons, lats, _total_atten, radius_km, lon_center, lat_center):
     fig, ax = plt.subplots()
     atten_db = _total_atten.to(u.dB).value
@@ -1993,6 +2051,9 @@ def gerar_img_perfil():
     project = None
     if project_slug:
         project = project_by_slug_or_404(project_slug, current_user.uuid)
+    receiver_id = data.get('receiverId') or data.get('receiver_id')
+    receiver_label = data.get('receiverLabel') or data.get('receiver_label')
+    receiver_summary = data.get('summary') if isinstance(data.get('summary'), dict) else {}
 
     # ========= parâmetros TX/RX =========
     Ptx_W         = max(float(current_user.transmission_power or 0.0), 1e-6)  # W
@@ -2315,7 +2376,10 @@ def gerar_img_perfil():
     curvature_adjustment = np.array([
         earth_curvature_correction(xi)
         for xi in x_smooth
-    ])
+    ], dtype=float)
+    if curvature_adjustment.size:
+        baseline = np.linspace(curvature_adjustment[0], curvature_adjustment[-1], curvature_adjustment.size)
+        curvature_adjustment = curvature_adjustment - baseline
 
     # base ajustada = linha direta menos queda de curvatura
     adjusted_base = direct_line - curvature_adjustment
@@ -2356,7 +2420,10 @@ def gerar_img_perfil():
     curvature_profile = np.array([
         earth_curvature_correction(dist)
         for dist in terrain_x
-    ])
+    ], dtype=float)
+    if curvature_profile.size:
+        baseline_profile = np.linspace(curvature_profile[0], curvature_profile[-1], curvature_profile.size)
+        curvature_profile = curvature_profile - baseline_profile
     fresnel_radius_profile = np.array([
         fresnel_zone_radius(
             d * 1000.0,
@@ -2473,24 +2540,76 @@ def gerar_img_perfil():
 
     # legenda organizada
     ax.legend(
-        loc='lower right',
+        loc='upper center',
+        bbox_to_anchor=(0.5, 1.22),
+        ncol=3,
         fontsize=9,
         frameon=True,
-        framealpha=0.9
+        framealpha=0.95
     )
 
     # ========= render final =========
     img_buffer = io.BytesIO()
     plt.savefig(img_buffer, format='png', bbox_inches='tight', dpi=120)
     img_buffer.seek(0)
+    image_bytes = img_buffer.getvalue()
 
-    # salva no usuário (binário bruto na sessão)
-    current_user.perfil_img = img_buffer.getvalue()
-    db.session.commit()
+    lat_series = _to_degree_array(latitudes) if 'latitudes' in locals() else []
+    lon_series = _to_degree_array(longitudes) if 'longitudes' in locals() else []
+    profile_payload = {
+        'source': google_profile.get('source', 'google') if google_profile else 'srtm',
+        'distance_km': rx_position_km,
+        'samples': len(heights_m),
+        'elevations_m': _downsample_sequence(heights_m.tolist()),
+        'latitudes': _downsample_sequence(lat_series.tolist() if hasattr(lat_series, 'tolist') else lat_series),
+        'longitudes': _downsample_sequence(lon_series.tolist() if hasattr(lon_series, 'tolist') else lon_series),
+    }
 
-    # devolve base64
-    img_buffer.seek(0)
-    img_base64 = base64.b64encode(img_buffer.read()).decode('utf-8')
+    current_user.perfil_img = image_bytes
+
+    profile_asset = None
+    receiver_record = None
+    asset_url = None
+    if project and receiver_id:
+        try:
+            profile_asset = _persist_receiver_profile_asset(project, receiver_label, image_bytes)
+            asset_url = url_for('projects.asset_preview', slug=project.slug, asset_id=profile_asset.id)
+            receiver_record = {
+                'id': receiver_id,
+                'label': receiver_label or receiver_id,
+                'lat': float(end_coords['lat']),
+                'lng': float(end_coords['lng']),
+                'municipality': receiver_summary.get('municipality'),
+                'field': receiver_summary.get('field') or receiver_summary.get('field_dbuv_m'),
+                'elevation': receiver_summary.get('elevation') or receiver_summary.get('elevation_m'),
+                'distance': receiver_summary.get('distance') or receiver_summary.get('distance_km'),
+                'bearing': receiver_summary.get('bearing') or receiver_summary.get('bearing_deg'),
+                'summary': receiver_summary,
+                'profile': profile_payload,
+                'profile_asset_id': str(profile_asset.id),
+                'profile_asset_path': profile_asset.path,
+                'profile_asset_url': asset_url,
+                'profile_meta': {
+                    'distance_km': rx_position_km,
+                    'erp_dbm': erp,
+                    'rx_power_dbm': sinal_recebido,
+                    'field_dbuv_m': field_rx_dbuv,
+                    'obstacles': obstacle_desc,
+                },
+                'profile': profile_payload,
+            }
+            _upsert_project_receiver(project, receiver_record)
+        except Exception as exc:
+            current_app.logger.warning('receiver.profile.persist_failed', extra={'error': str(exc)})
+
+    try:
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        current_app.logger.error('receiver.profile.commit_failed', exc_info=exc)
+        return jsonify({'error': 'Falha ao salvar o perfil gerado.'}), 500
+
+    img_base64 = base64.b64encode(image_bytes).decode('utf-8')
     img_buffer.close()
     plt.close(fig)
 
@@ -2502,7 +2621,13 @@ def gerar_img_perfil():
         "rx_power_dbm": sinal_recebido,
         "rx_field_dbuvm": field_rx_dbuv,
         "obstacles": obstacle_desc,
+        "profile": profile_payload,
     }
+    if profile_asset:
+        response_payload['asset_id'] = str(profile_asset.id)
+        response_payload['asset_url'] = asset_url
+    if receiver_record:
+        response_payload['receiver'] = receiver_record
     if message_payload:
         response_payload.update(message_payload)
 
@@ -2904,7 +3029,7 @@ def _enrich_receivers_metadata(receivers, tx_object):
             }
             rx_copy['ibge'] = {k: v for k, v in ibge_payload.items() if v not in (None, '', {}, [])}
 
-        if tx_coords and lat is not None and lon is not None:
+        if tx_coords and lat is not None and lon is not None and not rx_copy.get('profile'):
             profile = _build_receiver_profile(tx_coords, {'lat': lat, 'lng': lon})
             if profile:
                 rx_copy['profile'] = profile
@@ -5167,6 +5292,23 @@ def atualizar_localizacao_tx():
         'project': project.slug if project else None,
     }), 200
 
+
+@bp.route('/projects/<slug>/receivers/<receiver_id>', methods=['DELETE'])
+@login_required
+def delete_project_receiver(slug, receiver_id):
+    project = project_by_slug_or_404(slug, current_user.uuid)
+    settings = dict(project.settings or {})
+    bookmarks = settings.get('receiverBookmarks') or []
+    filtered = [entry for entry in bookmarks if str(entry.get('id')) != str(receiver_id)]
+    settings['receiverBookmarks'] = filtered
+    project.settings = settings
+    try:
+        db.session.commit()
+    except SQLAlchemyError as exc:
+        db.session.rollback()
+        return jsonify({'error': str(exc)}), 500
+    return jsonify({'removed': receiver_id, 'count': len(filtered)}), 200
+
 @bp.route('/clima-recomendado', methods=['GET'])
 @login_required
 def clima_recomendado():
@@ -5413,6 +5555,12 @@ def carregar_dados():
                 user_data['projectLastSavedAt'] = project_settings.get('lastSavedAt')
             if latest_snapshot:
                 user_data['lastCoverage'] = latest_snapshot
+
+        receiver_bookmarks = project_settings.get('receiverBookmarks') if isinstance(project_settings, dict) else None
+        if isinstance(receiver_bookmarks, list):
+            user_data['receiverBookmarks'] = receiver_bookmarks
+        else:
+            user_data['receiverBookmarks'] = []
 
         return jsonify(user_data), 200
     except Exception as e:

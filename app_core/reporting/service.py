@@ -465,7 +465,7 @@ def _build_metrics(project: Project, snapshot: Dict[str, Any], center_metrics: D
         "rx_power": center_metrics.get("received_power_center_dbm"),
         "loss_center": center_metrics.get("combined_loss_center_db"),
         "gain_center": center_metrics.get("effective_gain_center_db"),
-        #"horizontal_peak_to_peak_db": _horizontal_peak_to_peak_db(user),
+        "horizontal_peak_to_peak_db": _horizontal_peak_to_peak_db(user),
         "climate": settings.get("clima") or snapshot.get("climate_status") or "Não informado",
         # === CHAVES ADICIONADAS QUE CAUSAVAM O ERRO ===
         "tx_power_w": power_w,

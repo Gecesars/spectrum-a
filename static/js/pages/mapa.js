@@ -23,6 +23,8 @@ const state = {
     txData: null,
     txCoords: null,
     rxEntries: [],
+    rxSequence: 0,
+    savedReceiverBookmarks: [],
     selectedRxIndex: null,
     linkLine: null,
     directionLine: null,
@@ -125,6 +127,64 @@ function updateTxLegend(data) {
         <div class="tx-legend-line"><span>Altura torre</span><strong>${formatLegendValue(tower, ' m')}</strong></div>
     `;
     legend.hidden = false;
+}
+
+function generateReceiverId() {
+    state.rxSequence = (state.rxSequence || 0) + 1;
+    return `rx-${Date.now()}-${state.rxSequence}`;
+}
+
+function toDataUrl(base64) {
+    if (!base64) {
+        return null;
+    }
+    if (base64.startsWith('data:')) {
+        return base64;
+    }
+    return `data:image/png;base64,${base64}`;
+}
+
+function toNumeric(value) {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : null;
+}
+
+function mergeReceiverSnapshots(primary = [], fallback = []) {
+    const map = new Map();
+    const addEntry = (entry, override = false) => {
+        if (!entry) return;
+        const key = entry.id || `${entry.label || ''}-${entry.lat ?? ''}-${entry.lng ?? ''}`;
+        if (!key) return;
+        if (!map.has(key) || override) {
+            map.set(key, { ...entry });
+        }
+    };
+    fallback.forEach((item) => addEntry(item, false));
+    primary.forEach((item) => addEntry(item, true));
+    return Array.from(map.values());
+}
+
+function buildAssetPreviewUrl(assetId) {
+    const slug = getActiveProjectSlug();
+    if (!slug || !assetId) {
+        return null;
+    }
+    return `/projects/${encodeURIComponent(slug)}/assets/${encodeURIComponent(assetId)}/preview`;
+}
+
+function summaryPayloadFromEntry(entry) {
+    const summary = entry.summary || {};
+    return {
+        municipality: summary.municipality || null,
+        distance_km: summary.distanceValue ?? null,
+        distance: summary.distance || null,
+        field_dbuv_m: summary.fieldValue ?? null,
+        field: summary.field || null,
+        elevation_m: summary.elevationValue ?? null,
+        elevation: summary.elevation || null,
+        bearing_deg: summary.bearingValue ?? null,
+        bearing: summary.bearing || null,
+    };
 }
 
 function persistTxLocation(latLng) {
@@ -717,25 +777,90 @@ function refreshReceiverSummaries() {
 function serializeReceivers() {
     return state.rxEntries
         .map((entry, index) => {
+            if (!entry || !entry.marker) {
+                return null;
+            }
             const position = entry.marker.getPosition();
+            if (!position) {
+                return null;
+            }
             const lat = Number(position.lat());
             const lng = Number(position.lng());
             if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
                 return null;
             }
             const summary = entry.summary || {};
-            return {
+            const payload = {
+                id: entry.id,
                 lat: Number(lat.toFixed(7)),
                 lng: Number(lng.toFixed(7)),
                 label: entry.label || getRxLabel(index),
-                field: summary.field || null,
-                elevation: summary.elevation || null,
-                distance: summary.distance || null,
-                bearing: summary.bearing || null,
                 municipality: summary.municipality || null,
+                distance: summary.distance || null,
+                distance_km: summary.distanceValue ?? null,
+                bearing: summary.bearing || null,
+                bearing_deg: summary.bearingValue ?? null,
+                field: summary.fieldValue ?? null,
+                field_text: summary.field || null,
+                elevation: summary.elevationValue ?? null,
+                elevation_text: summary.elevation || null,
+                profile: entry.profile || null,
+                profile_meta: entry.profileMeta || null,
+                profile_asset_id: entry.profileAssetId || null,
+                profile_asset_path: entry.profileAssetPath || null,
+                profile_asset_url: entry.profileAssetUrl || null,
             };
+            if (entry.receiverRecord?.ibge) {
+                payload.ibge = entry.receiverRecord.ibge;
+            }
+            return payload;
         })
         .filter(Boolean);
+}
+
+function buildSummaryFromReceiver(receiver) {
+    const summary = {};
+    const distanceValue = parseNullableNumber(receiver.distance_km ?? receiver.distanceValue ?? receiver.distance);
+    if (Number.isFinite(distanceValue)) {
+        summary.distanceValue = distanceValue;
+        summary.distance = receiver.distance || `${distanceValue.toFixed(2)} km`;
+    } else if (receiver.distance_text) {
+        summary.distance = receiver.distance_text;
+    }
+    const bearingValue = parseNullableNumber(receiver.bearing_deg ?? receiver.bearingValue ?? receiver.bearing);
+    if (Number.isFinite(bearingValue)) {
+        summary.bearingValue = bearingValue;
+        summary.bearing = `${bearingValue.toFixed(1)}°`;
+    } else if (receiver.bearing) {
+        summary.bearing = receiver.bearing;
+    }
+    const fieldValue = parseNullableNumber(receiver.field ?? receiver.field_value ?? receiver.field_dbuv_m);
+    if (Number.isFinite(fieldValue)) {
+        summary.fieldValue = fieldValue;
+        summary.field = `${fieldValue.toFixed(1)} dBµV/m`;
+    } else if (receiver.field_text) {
+        summary.field = receiver.field_text;
+    }
+    const elevationValue = parseNullableNumber(receiver.elevation ?? receiver.elevation_m ?? receiver.elevationValue);
+    if (Number.isFinite(elevationValue)) {
+        summary.elevationValue = elevationValue;
+        summary.elevation = `${elevationValue.toFixed(1)} m`;
+    } else if (receiver.elevation_text) {
+        summary.elevation = receiver.elevation_text;
+    }
+    summary.municipality = receiver.municipality
+        || receiver.location?.municipality
+        || receiver.summary?.municipality
+        || null;
+    if (receiver.location?.state_code) {
+        summary.state = receiver.location.state_code;
+    } else if (receiver.state) {
+        summary.state = receiver.state;
+    }
+    if (receiver.ibge) {
+        summary.ibge = receiver.ibge;
+    }
+    return summary;
 }
 
 function restoreReceivers(receivers) {
@@ -750,17 +875,20 @@ function restoreReceivers(receivers) {
             return;
         }
         const position = new google.maps.LatLng(lat, lng);
-        const presetSummary = {
-            field: receiver.field || null,
-            elevation: receiver.elevation || null,
-            distance: receiver.distance || null,
-            bearing: receiver.bearing || null,
-            municipality: receiver.municipality || null,
-        };
+        const presetSummary = buildSummaryFromReceiver(receiver);
         createRxMarker(position, {
             selectOnCreate: false,
             presetLabel: receiver.label || null,
             presetSummary,
+            presetId: receiver.id || null,
+            presetProfile: receiver.profile || null,
+            profileAssetUrl: receiver.profile_asset_url
+                || (receiver.profile_asset_id ? buildAssetPreviewUrl(receiver.profile_asset_id) : null),
+            profileAssetId: receiver.profile_asset_id || null,
+            profileAssetPath: receiver.profile_asset_path || null,
+            profileMeta: receiver.profile_meta || null,
+            profileThumbnail: receiver.profile_image ? toDataUrl(receiver.profile_image) : null,
+            autoProfile: !(receiver.profile || receiver.profile_asset_id),
         });
     });
     state.selectedRxIndex = null;
@@ -1157,6 +1285,12 @@ async function loadCoverageOverlay(lastCoverage) {
     state.coverageData.colorbar_asset_id = lastCoverage.colorbar_asset_id;
     state.coverageData.engine = lastCoverage.engine || state.coverageData.engine || 'p1546';
     state.coverageData.receivers = coveragePayload.receivers;
+    if (state.savedReceiverBookmarks.length) {
+        state.coverageData.receivers = mergeReceiverSnapshots(
+            state.savedReceiverBookmarks,
+            state.coverageData.receivers || [],
+        );
+    }
     state.coverageData.signal_level_dict = coveragePayload.signal_level_dict;
     state.coverageData.signal_level_dict_dbm = coveragePayload.signal_level_dict_dbm;
     state.coverageData.tiles = coveragePayload.tiles || null;
@@ -1219,7 +1353,8 @@ async function loadCoverageOverlay(lastCoverage) {
     updateCenterSummary(coveragePayload.center_metrics);
 
     if (Array.isArray(coveragePayload.receivers)) {
-        restoreReceivers(coveragePayload.receivers);
+        const mergedReceivers = state.coverageData.receivers || coveragePayload.receivers;
+        restoreReceivers(mergedReceivers);
         refreshReceiverSummaries();
         state.coverageData.receivers = serializeReceivers();
     }
@@ -1302,6 +1437,18 @@ function removeRx(index) {
     const [entry] = state.rxEntries.splice(index, 1);
     if (entry) {
         entry.marker.setMap(null);
+        if (entry.id) {
+            state.savedReceiverBookmarks = state.savedReceiverBookmarks.filter(
+                (bookmark) => bookmark.id !== entry.id,
+            );
+            const projectSlug = getActiveProjectSlug();
+            if (projectSlug) {
+                fetch(`/projects/${encodeURIComponent(projectSlug)}/receivers/${encodeURIComponent(entry.id)}`, {
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json' },
+                }).catch(() => {});
+            }
+        }
     }
     if (state.linkLine) {
         state.linkLine.setMap(null);
@@ -1319,8 +1466,9 @@ function removeRx(index) {
 }
 
 function clearReceivers() {
-    state.rxEntries.forEach((entry) => entry.marker.setMap(null));
-    state.rxEntries = [];
+    while (state.rxEntries.length) {
+        removeRx(0);
+    }
     state.selectedRxIndex = null;
 
     if (state.linkLine) {
@@ -1351,18 +1499,59 @@ function renderRxList() {
     state.rxEntries.forEach((entry, idx) => {
         const li = document.createElement('li');
         li.className = `rx-item${idx === state.selectedRxIndex ? ' selected' : ''}`;
+        const summary = entry.summary || {};
+
+        const header = document.createElement('div');
+        header.className = 'rx-header';
+
+        const infoBlock = document.createElement('div');
+        infoBlock.className = 'rx-info';
 
         const title = document.createElement('div');
         title.className = 'rx-title';
         title.textContent = entry.label || getRxLabel(idx);
 
+        const municipality = document.createElement('div');
+        municipality.className = 'rx-municipality';
+        municipality.textContent = summary.municipality || 'Identificando município...';
+
+        infoBlock.appendChild(title);
+        infoBlock.appendChild(municipality);
+
+        const status = document.createElement('div');
+        status.className = 'rx-status';
+        if (entry.isProfileLoading) {
+            status.innerHTML = '<span class="badge text-bg-warning-subtle">Gerando perfil...</span>';
+        } else if (entry.profileThumbnail || entry.profileAssetUrl) {
+            status.innerHTML = '<span class="badge text-bg-success-subtle">Perfil disponível</span>';
+        } else {
+            status.innerHTML = '<span class="badge text-bg-secondary-subtle">Pendente</span>';
+        }
+
+        header.appendChild(infoBlock);
+        header.appendChild(status);
+
+        const preview = document.createElement('div');
+        preview.className = 'rx-preview';
+        if (entry.profileThumbnail || entry.profileAssetUrl) {
+            const img = document.createElement('img');
+            img.src = entry.profileThumbnail || entry.profileAssetUrl;
+            img.alt = `Perfil ${entry.label}`;
+            preview.appendChild(img);
+        } else {
+            const placeholder = document.createElement('div');
+            placeholder.className = 'rx-preview-placeholder';
+            placeholder.textContent = 'Prévia indisponível';
+            preview.appendChild(placeholder);
+        }
+
         const details = document.createElement('div');
         details.className = 'rx-details';
-        const summary = entry.summary || {};
         details.innerHTML = `
-            <span>${summary.distance || '-'}</span>
-            <span>${summary.field || '-'}</span>
-            <span>${summary.elevation || '-'}</span>
+            <span><strong>Distância</strong>${summary.distance || '-'}</span>
+            <span><strong>Campo</strong>${summary.field || '-'}</span>
+            <span><strong>Altitude</strong>${summary.elevation || '-'}</span>
+            <span><strong>Azimute</strong>${summary.bearing || '-'}</span>
         `;
 
         const actions = document.createElement('div');
@@ -1372,32 +1561,55 @@ function renderRxList() {
         focusBtn.type = 'button';
         focusBtn.textContent = 'Focar';
         focusBtn.className = 'btn btn-sm btn-outline-primary';
-        focusBtn.onclick = () => {
+        focusBtn.onclick = (event) => {
+            event.stopPropagation();
             state.map.panTo(entry.marker.getPosition());
             state.map.setZoom(Math.max(state.map.getZoom(), 11));
             selectRx(idx);
+        };
+
+        const profileBtn = document.createElement('button');
+        profileBtn.type = 'button';
+        profileBtn.textContent = entry.profileThumbnail || entry.profileAssetUrl ? 'Ver perfil' : 'Gerar perfil';
+        profileBtn.className = 'btn btn-sm btn-outline-secondary';
+        profileBtn.disabled = entry.isProfileLoading;
+        profileBtn.onclick = (event) => {
+            event.stopPropagation();
+            if (entry.profileThumbnail || entry.profileAssetUrl) {
+                showProfileModal(entry);
+            } else {
+                requestProfileGeneration(entry, { force: true, openModal: true });
+            }
         };
 
         const removeBtn = document.createElement('button');
         removeBtn.type = 'button';
         removeBtn.textContent = 'Remover';
         removeBtn.className = 'btn btn-sm btn-link text-danger';
-        removeBtn.onclick = () => removeRx(idx);
+        removeBtn.onclick = (event) => {
+            event.stopPropagation();
+            removeRx(idx);
+        };
 
         actions.appendChild(focusBtn);
+        actions.appendChild(profileBtn);
         actions.appendChild(removeBtn);
 
-        li.appendChild(title);
+        li.appendChild(header);
+        li.appendChild(preview);
         li.appendChild(details);
         li.appendChild(actions);
 
-        li.onclick = (event) => {
-            if (event.target === removeBtn || event.target === focusBtn) return;
+        li.onclick = () => {
             selectRx(idx);
         };
 
         container.appendChild(li);
     });
+
+    if (state.coverageData) {
+        state.coverageData.receivers = serializeReceivers();
+    }
 }
 
 function ensureElevationServiceAndGet(position) {
@@ -1415,11 +1627,17 @@ function ensureElevationServiceAndGet(position) {
 
 function computeReceiverSummary(position) {
     const distanceMeters = google.maps.geometry.spherical.computeDistanceBetween(state.txCoords, position);
-    const bearing = google.maps.geometry.spherical.computeHeading(state.txCoords, position);
+    const bearingRaw = google.maps.geometry.spherical.computeHeading(state.txCoords, position);
+    const distanceKm = distanceMeters / 1000;
+    const normalizedBearing = normalizeAzimuth(bearingRaw);
 
     const summary = {
-        distance: `${(distanceMeters / 1000).toFixed(2)} km`,
-        bearing: `${bearing.toFixed(1)}°`,
+        distance: `${distanceKm.toFixed(2)} km`,
+        distanceValue: Number(distanceKm.toFixed(3)),
+        bearing: `${normalizedBearing.toFixed(1)}°`,
+        bearingValue: Number(normalizedBearing.toFixed(3)),
+        lat: Number(position.lat().toFixed(7)),
+        lng: Number(position.lng().toFixed(7)),
     };
 
     if (state.coverageData && state.coverageData.signal_level_dict) {
@@ -1429,6 +1647,7 @@ function computeReceiverSummary(position) {
             state.coverageData.signal_level_dict
         );
         if (field !== null) {
+            summary.fieldValue = Number(field.toFixed(3));
             summary.field = `${field.toFixed(1)} dBµV/m`;
         }
     }
@@ -1436,6 +1655,7 @@ function computeReceiverSummary(position) {
     return ensureElevationServiceAndGet(position)
         .then((elevation) => {
             if (elevation !== null) {
+                summary.elevationValue = Number(elevation.toFixed(2));
                 summary.elevation = `${elevation.toFixed(1)} m`;
             }
             return fetchMunicipality(position);
@@ -1454,10 +1674,19 @@ function createRxMarker(position, options = {}) {
         selectOnCreate = true,
         presetLabel = null,
         presetSummary = null,
+        presetId = null,
+        presetProfile = null,
+        profileAssetUrl = null,
+        profileAssetId = null,
+        profileAssetPath = null,
+        profileMeta = null,
+        profileThumbnail = null,
+        autoProfile = true,
     } = options;
 
     const nextIndex = state.rxEntries.length;
     const labelText = presetLabel || getRxLabel(nextIndex);
+    const entryId = presetId || generateReceiverId();
 
     const defaultIcon = {
         path: google.maps.SymbolPath.CIRCLE,
@@ -1489,10 +1718,21 @@ function createRxMarker(position, options = {}) {
     });
 
     const entry = {
+        id: entryId,
         marker,
         summary: null,
         icons: { default: defaultIcon, selected: selectedIcon },
         label: labelText,
+        profile: presetProfile || null,
+        profileAssetUrl: profileAssetUrl || null,
+        profileAssetId: profileAssetId || null,
+        profileAssetPath: profileAssetPath || null,
+        profileMeta: profileMeta || null,
+        profileThumbnail: profileThumbnail ? toDataUrl(profileThumbnail) : null,
+        isProfileLoading: false,
+        profileRequested: Boolean(profileAssetUrl || profileAssetId || presetProfile),
+        autoProfileEnabled: autoProfile,
+        receiverRecord: options.receiverRecord || null,
     };
 
     marker.addListener('click', () => {
@@ -1504,6 +1744,19 @@ function createRxMarker(position, options = {}) {
 
     state.rxEntries.push(entry);
 
+    const startAutoProfile = () => {
+        if (!entry.autoProfileEnabled) {
+            return;
+        }
+        if (entry.profileAssetUrl || entry.profileThumbnail || entry.profileRequested) {
+            return;
+        }
+        entry.profileRequested = true;
+        requestProfileGeneration(entry, { silent: true }).catch(() => {
+            entry.profileRequested = false;
+        });
+    };
+
     const hydrateSummary = (summary) => {
         entry.summary = summary;
         if (state.selectedRxIndex === state.rxEntries.indexOf(entry)) {
@@ -1511,6 +1764,7 @@ function createRxMarker(position, options = {}) {
             openRxLegend(entry);
         }
         renderRxList();
+        startAutoProfile();
     };
 
     if (presetSummary) {
@@ -1850,60 +2104,196 @@ function generateCoverage() {
         });
 }
 
-function generateProfile() {
-    if (state.selectedRxIndex === null) {
-        showToast('Selecione um RX na lista', true);
+function showProfileModal(entry) {
+    const imageElement = document.getElementById('profileImage');
+    if (!imageElement) {
         return;
     }
+    updateProfileLegend(entry);
+    const source = entry?.profileThumbnail || entry?.profileAssetUrl || null;
+    if (!source) {
+        showToast('Perfil ainda não disponível para este receptor.', true);
+        return;
+    }
+    imageElement.src = source;
+    const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('profileModal'));
+    modal.show();
+}
 
-    const entry = state.rxEntries[state.selectedRxIndex];
-    if (!entry || !state.txCoords) return;
+function updateProfileLegend(entry) {
+    const summary = entry?.summary || {};
+    const meta = entry?.profileMeta || {};
+    const tx = state.txData || {};
+    const setText = (id, value) => {
+        const element = document.getElementById(id);
+        if (element) {
+            element.textContent = value ?? '—';
+        }
+    };
 
+    const formatMeters = (value) => (Number.isFinite(Number(value)) ? `${Number(value).toFixed(1)} m` : '—');
+    const formatDb = (value, suffix = 'dB') => (Number.isFinite(Number(value)) ? `${Number(value).toFixed(1)} ${suffix}` : '—');
+    const formatDistance = (value) => (Number.isFinite(Number(value)) ? `${Number(value).toFixed(2)} km` : '—');
+
+    setText('profileTxMunicipality', tx.txLocationName || tx.municipality || '-');
+    setText('profileTxAltitude', formatMeters(tx.txElevation));
+    setText('profileTxTower', formatMeters(tx.towerHeight));
+    const direction = tx.antennaDirection != null ? formatAzimuth(tx.antennaDirection) : null;
+    setText('profileTxDirection', direction);
+
+    setText('profileRxMunicipality', summary.municipality || '-');
+    setText('profileRxElevation', summary.elevation || formatMeters(summary.elevationValue));
+    setText('profileRxField', summary.field || (Number.isFinite(summary.fieldValue) ? `${summary.fieldValue.toFixed(1)} dBµV/m` : '—'));
+    const rxHeight = tx.rxHeight != null ? `${Number(tx.rxHeight).toFixed(1)} m` : '—';
+    const bearingText = summary.bearing || (Number.isFinite(summary.bearingValue) ? `${summary.bearingValue.toFixed(1)}°` : '—');
+    setText('profileRxHeading', `${bearingText} / ${rxHeight}`);
+
+    const metaDistance = meta.distance_km ?? summary.distanceValue;
+    setText('profileLinkDistance', formatDistance(metaDistance) || summary.distance || '—');
+    setText('profileLinkErp', formatDb(meta.erp_dbm, 'dBm'));
+    setText('profileLinkPower', formatDb(meta.rx_power_dbm, 'dBm'));
+    setText('profileLinkField', meta.field_dbuv_m != null ? `${Number(meta.field_dbuv_m).toFixed(1)} dBµV/m` : summary.field || '—');
+    setText('profileLinkObstacles', meta.obstacles || 'Sem bloqueios relevantes');
+}
+
+function requestProfileGeneration(entry, options = {}) {
+    const { force = false, openModal = false, silent = false } = options;
+    if (!entry || !state.txCoords) {
+        if (!silent) {
+            showToast('Defina a estação transmissora antes de gerar perfis.', true);
+        }
+        return Promise.reject(new Error('TX não definido'));
+    }
+    entry.summary = entry.summary || {};
+    if (!force && (entry.profileThumbnail || entry.profileAssetUrl)) {
+        if (openModal) {
+            showProfileModal(entry);
+        }
+        return Promise.resolve();
+    }
+    if (entry.isProfileLoading) {
+        return entry.pendingProfilePromise || Promise.resolve();
+    }
     const projectSlug = getActiveProjectSlug();
     if (!projectSlug) {
-        showToast('Defina um projeto antes de gerar o perfil.', true);
-        return;
+        if (!silent) {
+            showToast('Selecione um projeto antes de gerar perfis.', true);
+        }
+        return Promise.reject(new Error('Projeto não informado'));
     }
-
     const tx = state.txCoords;
     const rx = entry.marker.getPosition();
-
+    if (!rx) {
+        return Promise.reject(new Error('Receptor sem posição definida'));
+    }
     const payload = {
         path: [
             { lat: tx.lat(), lng: tx.lng() },
             { lat: rx.lat(), lng: rx.lng() },
         ],
         projectSlug,
+        receiverId: entry.id,
+        receiverLabel: entry.label,
+        summary: summaryPayloadFromEntry(entry),
     };
 
-    setProfileLoading(true);
-    fetch('/gerar_img_perfil', {
+    entry.isProfileLoading = true;
+    renderRxList();
+
+    const promise = fetch('/gerar_img_perfil', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
     })
-    .then((response) => {
-        if (!response.ok) {
-            throw new Error('Falha ao gerar perfil');
-        }
-        return response.json();
-    })
-    .then((data) => {
-        if (data.message) {
-            showToast(data.message, Boolean(data.warning));
-        }
-        const img = document.getElementById('profileImage');
-        img.src = `data:image/png;base64,${data.image}`;
-        const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('profileModal'));
-        modal.show();
-    })
-    .catch((error) => {
-        console.error(error);
-        showToast('Não foi possível gerar o perfil', true);
-    })
-    .finally(() => {
-        setProfileLoading(false);
-    });
+        .then((response) => {
+            if (!response.ok) {
+                return response.json().catch(() => ({})).then((json) => {
+                    throw new Error(json.error || 'Falha ao gerar perfil');
+                });
+            }
+            return response.json();
+        })
+        .then((data) => {
+            if (data.message && !silent) {
+                showToast(data.message, Boolean(data.warning));
+            }
+            if (data.image) {
+                entry.profileThumbnail = toDataUrl(data.image);
+            }
+            if (data.profile) {
+                entry.profile = data.profile;
+            }
+            if (data.profile_meta) {
+                entry.profileMeta = data.profile_meta;
+            }
+            if (data.asset_id) {
+                entry.profileAssetId = data.asset_id;
+                entry.profileAssetUrl = data.asset_url || buildAssetPreviewUrl(data.asset_id);
+            } else if (!entry.profileAssetUrl && entry.profileAssetId) {
+                entry.profileAssetUrl = buildAssetPreviewUrl(entry.profileAssetId);
+            }
+            if (data.receiver) {
+                entry.receiverRecord = data.receiver;
+                if (data.receiver.profile_asset_id) {
+                    entry.profileAssetId = data.receiver.profile_asset_id;
+                    entry.profileAssetUrl = data.receiver.profile_asset_url || entry.profileAssetUrl || buildAssetPreviewUrl(data.receiver.profile_asset_id);
+                    entry.profileAssetPath = data.receiver.profile_asset_path || entry.profileAssetPath;
+                }
+                entry.profileMeta = data.receiver.profile_meta || entry.profileMeta;
+                if (!entry.summary?.municipality && data.receiver.municipality) {
+                    entry.summary = entry.summary || {};
+                    entry.summary.municipality = data.receiver.municipality;
+                }
+                state.savedReceiverBookmarks = mergeReceiverSnapshots(
+                    [data.receiver],
+                    state.savedReceiverBookmarks,
+                );
+            }
+            entry.profileRequested = true;
+            if (state.coverageData) {
+                state.coverageData.receivers = serializeReceivers();
+            }
+            if (openModal) {
+                showProfileModal(entry);
+            }
+            return data;
+        })
+        .catch((error) => {
+            entry.profileRequested = false;
+            if (!silent) {
+                showToast(error.message || 'Não foi possível gerar o perfil', true);
+            }
+            throw error;
+        })
+        .finally(() => {
+            entry.isProfileLoading = false;
+            entry.pendingProfilePromise = null;
+            renderRxList();
+        });
+
+    entry.pendingProfilePromise = promise;
+    return promise;
+}
+
+function showSelectedProfile() {
+    if (state.selectedRxIndex === null) {
+        showToast('Selecione um RX na lista', true);
+        return;
+    }
+    const entry = state.rxEntries[state.selectedRxIndex];
+    if (!entry) {
+        return;
+    }
+    if (entry.profileThumbnail || entry.profileAssetUrl) {
+        showProfileModal(entry);
+        return;
+    }
+    setProfileLoading(true);
+    requestProfileGeneration(entry, { force: true, openModal: true })
+        .catch(() => {})
+        .finally(() => {
+            setProfileLoading(false);
+        });
 }
 
 function initControls() {
@@ -1912,7 +2302,7 @@ function initControls() {
         radiusInput.addEventListener('input', updateRadiusLabel);
     }
     document.getElementById('btnGenerateCoverage').addEventListener('click', generateCoverage);
-    document.getElementById('btnGenerateProfile').addEventListener('click', generateProfile);
+    document.getElementById('btnGenerateProfile').addEventListener('click', showSelectedProfile);
     document.getElementById('btnClearRx').addEventListener('click', clearReceivers);
 
     const overlayInput = document.getElementById('overlayOpacity');
@@ -2029,6 +2419,10 @@ function initCoverageMap() {
         .then((data) => {
             const projectSettings = data.projectSettings || {};
             const lastCoverage = projectSettings.lastCoverage || {};
+            const receiverBookmarks = Array.isArray(data.receiverBookmarks)
+                ? data.receiverBookmarks
+                : (Array.isArray(projectSettings.receiverBookmarks) ? projectSettings.receiverBookmarks : []);
+            state.savedReceiverBookmarks = receiverBookmarks;
 
             let slugCandidate = data.projectSlug
                 || projectSettings.slug
@@ -2103,6 +2497,13 @@ function initCoverageMap() {
                     state.isRt3dRaysVisible = true;
                 }
 
+                if (state.savedReceiverBookmarks.length) {
+                    state.coverageData.receivers = mergeReceiverSnapshots(
+                        state.savedReceiverBookmarks,
+                        state.coverageData.receivers || [],
+                    );
+                }
+
                 if (state.coverageData.center_metrics) {
                     updateCenterSummary(state.coverageData.center_metrics);
                 }
@@ -2173,6 +2574,8 @@ function initCoverageMap() {
                     });
             } else if (state.coverageData && Array.isArray(state.coverageData.receivers)) {
                 restoreReceivers(state.coverageData.receivers);
+            } else if (state.savedReceiverBookmarks.length) {
+                restoreReceivers(state.savedReceiverBookmarks);
             }
         })
         .catch((error) => {

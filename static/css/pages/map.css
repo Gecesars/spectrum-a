@@ -369,17 +369,79 @@
     box-shadow: 0 14px 30px -18px rgba(13, 110, 253, 0.55);
 }
 
+.rx-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 0.75rem;
+}
+
+.rx-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+}
+
 .rx-title {
     font-weight: 600;
     color: var(--brand-secondary);
 }
 
-.rx-details {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(60px, 1fr));
-    gap: 0.35rem;
+.rx-municipality {
     font-size: 0.8rem;
     color: var(--text-secondary);
+}
+
+.rx-status .badge {
+    font-size: 0.72rem;
+}
+
+.rx-preview {
+    width: 100%;
+    min-height: 72px;
+    border-radius: 10px;
+    border: 1px dashed var(--border-soft);
+    background: #f8fafc;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+}
+
+.rx-preview img {
+    width: 100%;
+    height: auto;
+    object-fit: cover;
+}
+
+.rx-preview-placeholder {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    text-align: center;
+    padding: 0.25rem 0.5rem;
+}
+
+.rx-details {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(110px, 1fr));
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.rx-details span {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    padding: 0.2rem 0;
+}
+
+.rx-details span strong {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
 }
 
 .rx-actions {
@@ -394,6 +456,51 @@
     height: auto;
     border-radius: 12px;
     box-shadow: 0 20px 40px -30px rgba(13, 110, 253, 0.35);
+}
+
+.profile-legend {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.legend-card {
+    border: 1px solid var(--border-soft);
+    border-radius: 12px;
+    padding: 0.85rem;
+    background: #f8fafc;
+}
+
+.legend-title {
+    font-weight: 600;
+    margin-bottom: 0.4rem;
+    color: var(--brand-secondary);
+}
+
+.legend-card dl {
+    margin: 0;
+    display: grid;
+    gap: 0.3rem;
+}
+
+.legend-card dl div {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+}
+
+.legend-card dt {
+    font-weight: 600;
+    color: var(--text-muted);
+}
+
+.legend-card dd {
+    margin: 0;
+    font-weight: 500;
+    color: var(--text-primary);
+    text-align: right;
 }
 
 @media (max-width: 992px) {

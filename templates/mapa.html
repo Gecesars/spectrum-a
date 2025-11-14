@@ -234,8 +234,8 @@
 
         <div class="panel-card">
             <h3 class="card-title">Perfil Profissional</h3>
-            <p class="assist-text">Selecione um ponto RX no mapa para visualizar o perfil com Fresnel e curvatura.</p>
-            <button class="btn btn-outline-primary w-100" id="btnGenerateProfile" disabled>Gerar perfil do enlace</button>
+            <p class="assist-text">Cada RX gera automaticamente um perfil com Fresnel, curvatura e perdas. Selecione-o na lista para visualizar ou atualizar.</p>
+            <button class="btn btn-outline-primary w-100" id="btnGenerateProfile" disabled>Ver perfil selecionado</button>
             <div class="text-center mt-3" id="profileSpinner" hidden>
                 <div class="spinner-border text-primary" role="status">
                     <span class="visually-hidden">Gerando perfil do enlace...</span>
@@ -289,10 +289,42 @@
     <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">Perfil de Enlace</h5>
+                <div>
+                    <h5 class="modal-title mb-0">Perfil de enlace</h5>
+                    <small class="text-muted">Fresnel, curvatura e perdas para o receptor selecionado.</small>
+                </div>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
             </div>
             <div class="modal-body">
+                <div class="profile-legend">
+                    <div class="legend-card">
+                        <p class="legend-title">Transmissor</p>
+                        <dl>
+                            <div><dt>Município</dt><dd id="profileTxMunicipality">—</dd></div>
+                            <div><dt>Altitude</dt><dd id="profileTxAltitude">—</dd></div>
+                            <div><dt>Torre (agl)</dt><dd id="profileTxTower">—</dd></div>
+                            <div><dt>Direção</dt><dd id="profileTxDirection">—</dd></div>
+                        </dl>
+                    </div>
+                    <div class="legend-card">
+                        <p class="legend-title">Receptor</p>
+                        <dl>
+                            <div><dt>Município</dt><dd id="profileRxMunicipality">—</dd></div>
+                            <div><dt>Altitude</dt><dd id="profileRxElevation">—</dd></div>
+                            <div><dt>Campo estimado</dt><dd id="profileRxField">—</dd></div>
+                            <div><dt>Azimute / Altura RX</dt><dd id="profileRxHeading">—</dd></div>
+                        </dl>
+                    </div>
+                    <div class="legend-card">
+                        <p class="legend-title">Link</p>
+                        <dl>
+                            <div><dt>Distância</dt><dd id="profileLinkDistance">—</dd></div>
+                            <div><dt>ERP (TX)</dt><dd id="profileLinkErp">—</dd></div>
+                            <div><dt>P. RX</dt><dd id="profileLinkPower">—</dd></div>
+                            <div><dt>Observações</dt><dd id="profileLinkObstacles">—</dd></div>
+                        </dl>
+                    </div>
+                </div>
                 <img id="profileImage" alt="Perfil de enlace" class="profile-image" />
             </div>
         </div>
