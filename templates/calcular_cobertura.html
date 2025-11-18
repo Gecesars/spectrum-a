@@ -114,14 +114,6 @@
                     {% if center_metrics %}
                     <div class="row g-3 small text-muted mt-3">
                         <div class="col-sm-4">
-                            <div class="fw-semibold text-uppercase">Campo no centro</div>
-                            <div>{{ center_metrics.field_center_dbuv_m|round(2) if center_metrics.field_center_dbuv_m is not none else '—' }} dBµV/m</div>
-                        </div>
-                        <div class="col-sm-4">
-                            <div class="fw-semibold text-uppercase">Potência RX</div>
-                            <div>{{ center_metrics.received_power_center_dbm|round(2) if center_metrics.received_power_center_dbm is not none else '—' }} dBm</div>
-                        </div>
-                        <div class="col-sm-4">
                             <div class="fw-semibold text-uppercase">Perda total</div>
                             <div>{{ center_metrics.combined_loss_center_db|round(2) if center_metrics.combined_loss_center_db is not none else '—' }} dB</div>
                         </div>
@@ -341,7 +333,7 @@
                             <input type="number" id="transmissionPower" name="transmissionPower" class="form-control" min="0" step="any" required>
                         </div>
                         <div>
-                            <label for="antennaGain" class="form-label">Ganho da antena (dBi)</label>
+                            <label for="antennaGain" class="form-label">Ganho da antena (dBd)</label>
                             <input type="number" id="antennaGain" name="antennaGain" class="form-control" min="0" step="any" required>
                         </div>
                         <div>

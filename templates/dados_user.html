@@ -45,7 +45,7 @@
                     <th>Altura da Torre (m)</th>
                     <th>Tipo de Cabo</th>
                     <th>Potência de Transmissão (W)</th>
-                    <th>Ganho da Antena (dBi)</th>
+                    <th>Ganho da Antena (dBd)</th>
                     <th>Latitude</th>
                     <th>Longitude</th>
                 </tr>
@@ -58,7 +58,13 @@
                     <td>{{ dado.tower_height }}</td>
                     <td>{{ dado.cable_type }}</td>
                     <td>{{ dado.transmission_power }}</td>
-                    <td>{{ dado.antenna_gain }}</td>
+                    <td>
+                        {% if dado.antenna_gain is not none %}
+                            {{ (dado.antenna_gain - 2.15)|round(2) }}
+                        {% else %}
+                            —
+                        {% endif %}
+                    </td>
                     <td>{{ dado.latitude }}</td>
                     <td>{{ dado.longitude }}</td>
                 </tr>

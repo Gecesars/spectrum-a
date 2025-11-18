@@ -59,3 +59,13 @@
     overflow-y: auto;
     white-space: pre-wrap;
 }
+
+.company-logo-preview {
+    width: 88px;
+    height: 88px;
+    object-fit: contain;
+    background-color: #f5f7fb;
+    border: 1px dashed rgba(0, 0, 0, 0.2);
+    border-radius: 0.6rem;
+    padding: 0.35rem;
+}

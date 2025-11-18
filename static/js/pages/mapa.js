@@ -739,8 +739,6 @@ function updateGainSummary(gainComponents, scale) {
 function updateCenterSummary(metrics) {
     const data = metrics || {};
     document.getElementById('centerLoss').textContent = formatWithUnit(data.combined_loss_center_db, 'dB');
-    document.getElementById('centerPower').textContent = formatWithUnit(data.received_power_center_dbm, 'dBm');
-    document.getElementById('centerField').textContent = formatWithUnit(data.field_center_dbuv_m, 'dBµV/m');
     document.getElementById('centerGain').textContent = formatWithUnit(data.effective_gain_center_db, 'dB');
 
     const pathInfo = document.getElementById('pathTypeInfo');
@@ -995,8 +993,6 @@ function restoreCoverageFromProject(data) {
     if (last.center_metrics) {
         updateGainSummary(null, null);
         document.getElementById('centerLoss').textContent = formatDb(last.center_metrics.combined_loss_center_db);
-        document.getElementById('centerPower').textContent = formatDb(last.center_metrics.received_power_center_dbm);
-        document.getElementById('centerField').textContent = formatNumber(last.center_metrics.field_center_dbuv_m, ' dBµV/m');
     }
 
     const radiusInput = document.getElementById('radiusInput');

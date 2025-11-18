@@ -87,8 +87,7 @@
                             <p class="mb-1"><strong>Raio:</strong> {{ last_coverage['radius_km'] }} km</p>
                             {% set center_metrics = last_coverage.get('center_metrics') %}
                             {% if center_metrics %}
-                                <p class="mb-1"><strong>Campo no centro:</strong> {{ center_metrics.field_center_dbuv_m|round(2) if center_metrics.field_center_dbuv_m is not none else '—' }} dBµV/m</p>
-                                <p class="mb-1"><strong>Potência RX:</strong> {{ center_metrics.received_power_center_dbm|round(2) if center_metrics.received_power_center_dbm is not none else '—' }} dBm</p>
+                                <p class="mb-1"><strong>Perda combinada:</strong> {{ center_metrics.combined_loss_center_db|round(2) if center_metrics.combined_loss_center_db is not none else '—' }} dB</p>
                             {% endif %}
                             <a class="btn btn-sm btn-outline-primary mt-2" href="{{ url_for('projects.asset_preview', slug=project.slug, asset_id=last_coverage['asset_id']) }}" target="_blank">Ver imagem em nova aba</a>
                         </div>

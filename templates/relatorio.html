@@ -86,6 +86,17 @@
                         <label class="form-label">Cor do cabeçalho</label>
                         <input type="color" class="form-control form-control-color" id="inputHeaderColor" value="#0d47a1" title="Cor do cabeçalho">
                     </div>
+                    <div class="mb-3">
+                        <label class="form-label">Logo da empresa</label>
+                        <div class="d-flex align-items-center gap-3 flex-wrap">
+                            <img id="companyLogoPreview" class="company-logo-preview d-none" alt="Logo da empresa">
+                            <div class="flex-grow-1">
+                                <input type="file" class="form-control" id="companyLogoInput" accept="image/*">
+                                <button type="button" class="btn btn-sm btn-outline-danger mt-2" id="companyLogoRemoveBtn">Remover</button>
+                                <small class="text-muted d-block mt-1">Aplicado no topo do relatório.</small>
+                            </div>
+                        </div>
+                    </div>
                     <div class="mb-0">
                         <label class="form-label">Notas do projeto</label>
                         <textarea class="form-control" id="inputProjectNotes" rows="3"></textarea>

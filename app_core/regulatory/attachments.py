@@ -172,7 +172,6 @@ def build_auto_attachments(
         cov_sections = [
             ("Engine", coverage.get("engine")),
             ("Raio (km)", coverage.get("radius_km") or coverage.get("requested_radius_km")),
-            ("Campo centro (dBµV/m)", (coverage.get("center_metrics") or {}).get("field_center_dbuv_m")),
             ("Perda combinada (dB)", (coverage.get("center_metrics") or {}).get("combined_loss_center_db")),
         ]
         laudo_pdf = _encode_pdf(_pdf_bytes("Laudo de Vistoria - Cobertura", cov_sections))

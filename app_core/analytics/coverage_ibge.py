@@ -22,23 +22,11 @@ from app_core.integrations import ibge as ibge_api
 LOGGER = logging.getLogger(__name__)
 
 _GEOCODE_PRECISION = 3  # grau ~ 110m
-_OPEN_METEO_DISABLED = False
-_OPEN_METEO_FIRST_FAILURE_LOGGED = False
-_OPEN_METEO_SKIP_LOGGED = False
-
-OPEN_METEO_REVERSE_URL = "https://geocoding-api.open-meteo.com/v1/reverse"
 OSM_REVERSE_URL = "https://nominatim.openstreetmap.org/reverse"
 
 
 def _round_coord(value: float, precision: int = _GEOCODE_PRECISION) -> float:
     return round(float(value), precision)
-
-
-def _open_meteo_enabled() -> bool:
-    try:
-        return bool(current_app.config.get("IBGE_ENABLE_OPEN_METEO", False))
-    except Exception:
-        return False
 
 
 @dataclass
@@ -95,63 +83,6 @@ def _cluster_points(points: List[Tuple[float, float, float]], precision: int = 2
     return cluster_list
 
 
-@lru_cache(maxsize=2048)
-def _reverse_geocode_open_meteo_cached(lat_key: float, lon_key: float) -> Optional[Dict[str, str]]:
-    global _OPEN_METEO_DISABLED, _OPEN_METEO_FIRST_FAILURE_LOGGED
-    lat = float(lat_key)
-    lon = float(lon_key)
-    params = {
-        "latitude": lat,
-        "longitude": lon,
-        "count": 1,
-        "language": "pt",
-        "format": "json",
-    }
-    try:
-        resp = requests.get(OPEN_METEO_REVERSE_URL, params=params, timeout=15)
-        resp.raise_for_status()
-        results = resp.json().get("results") or []
-        if not results:
-            return None
-        data = results[0]
-        return {
-            "name": data.get("name"),
-            "state": data.get("admin1"),
-            "country": data.get("country"),
-        }
-    except requests.RequestException as exc:
-        status_code = getattr(getattr(exc, "response", None), "status_code", None)
-        if status_code == 404:
-            _OPEN_METEO_DISABLED = True
-        if not _OPEN_METEO_FIRST_FAILURE_LOGGED:
-            LOGGER.warning(
-                "reverse_geocode_open_meteo_failed",
-                extra={"error": str(exc), "status": status_code},
-            )
-            _OPEN_METEO_FIRST_FAILURE_LOGGED = True
-        else:
-            LOGGER.debug(
-                "reverse_geocode_open_meteo_failed",
-                extra={"error": str(exc), "status": status_code},
-            )
-        return None
-
-
-def _reverse_geocode_open_meteo(lat: float, lon: float) -> Optional[Dict[str, str]]:
-    global _OPEN_METEO_DISABLED, _OPEN_METEO_SKIP_LOGGED
-    if not _open_meteo_enabled():
-        if not _OPEN_METEO_SKIP_LOGGED:
-            LOGGER.info("reverse_geocode_open_meteo_disabled_by_config")
-            _OPEN_METEO_SKIP_LOGGED = True
-        _OPEN_METEO_DISABLED = True
-        return None
-    if _OPEN_METEO_DISABLED:
-        return None
-    lat_key = _round_coord(lat)
-    lon_key = _round_coord(lon)
-    return _reverse_geocode_open_meteo_cached(lat_key, lon_key)
-
-
 @lru_cache(maxsize=4096)
 def _reverse_geocode_osm_cached(lat_key: float, lon_key: float) -> Optional[Dict[str, str]]:
     lat = float(lat_key)
@@ -186,8 +117,6 @@ def _reverse_geocode_osm(lat: float, lon: float) -> Optional[Dict[str, str]]:
 
 def _resolve_municipality(lat: float, lon: float) -> Optional[Dict[str, str]]:
     detail = _reverse_geocode_osm(lat, lon)
-    if not detail:
-        detail = _reverse_geocode_open_meteo(lat, lon)
     if not detail:
         return None
 
@@ -311,4 +240,3 @@ def summarize_coverage_demographics(
         "cluster_count": len(clusters),
         "municipalities": payload,
     }
-

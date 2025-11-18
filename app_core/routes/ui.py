@@ -77,6 +77,23 @@ from app_core.utils import (
 from app_core.regulatory.service import build_default_payload
 from app_core.integrations import ibge as ibge_api
 
+GAIN_OFFSET_DBI_DBD = 2.15
+
+
+def _gain_dbi_to_dbd(value):
+    try:
+        return float(value) - GAIN_OFFSET_DBI_DBD
+    except (TypeError, ValueError):
+        return None
+
+
+def _gain_dbd_to_dbi(value):
+    try:
+        return float(value) + GAIN_OFFSET_DBI_DBD
+    except (TypeError, ValueError):
+        return None
+
+
 matplotlib.use('Agg')
 
 bp = Blueprint('ui', __name__)
@@ -521,6 +538,8 @@ def salvar_dados():
         if incoming_key in data:
             value = _coerce_float(data.get(incoming_key))
             if value is not None:
+                if incoming_key == "antennaGain":
+                    value = value + GAIN_OFFSET_DBI_DBD
                 setattr(current_user, model_attr, value)
 
     # tempo percentual (0.001 a 50%)
@@ -1371,8 +1390,6 @@ def home():
     })
 
     coverage_metrics_panel = [
-        _format_metric('Campo no centro', center_metrics.get('field_center_dbuv_m'), 'dBµV/m'),
-        _format_metric('Potência recebida', center_metrics.get('received_power_center_dbm'), 'dBm'),
         _format_metric('Perda combinada', center_metrics.get('combined_loss_center_db'), 'dB'),
         _format_metric('Ganho efetivo', center_metrics.get('effective_gain_center_db'), 'dB'),
         _format_metric('Distância ao centro', center_metrics.get('distance_center_km'), 'km', precision=3),
@@ -2657,7 +2674,7 @@ def gerar_img_perfil():
                     'field_dbuv_m': field_rx_dbuv,
                     'obstacles': obstacle_desc,
                 },
-                'profile': profile_payload,
+                'profile_info': info_lines,
             }
             _upsert_project_receiver(project, receiver_record)
         except Exception as exc:
@@ -2921,73 +2938,125 @@ def _compute_site_elevation(lat, lon):
         return None
 
 
-def _lookup_municipality_details(lat, lon, include_ibge=False):
-    providers = (
-        (
-            'open-meteo',
-            'https://geocoding-api.open-meteo.com/v1/reverse',
-            {
-                'latitude': lat,
-                'longitude': lon,
-                'count': 1,
-                'language': 'pt',
-            },
-            {},
-        ),
-        (
-            'osm-nominatim',
-            'https://nominatim.openstreetmap.org/reverse',
-            {
-                'lat': lat,
-                'lon': lon,
-                'format': 'jsonv2',
-                'accept-language': 'pt-BR',
-            },
-            {'headers': {'User-Agent': 'ATXCoverage/1.0'}},
-        ),
-    )
+def _compute_haat_radials(
+    lat_deg,
+    lon_deg,
+    tower_height_m,
+    site_elevation_m=None,
+    dem_directory=None,
+    inner_km=3.0,
+    outer_km=16.0,
+    bearing_step_deg=15,
+    profile_step_m=200.0,
+):
+    """Calcula HAAT médio com radiais a cada 15° usando perfis SRTM."""
+    try:
+        lat = float(lat_deg)
+        lon = float(lon_deg)
+    except (TypeError, ValueError, RuntimeError):
+        return [], None
 
-    for provider, url, params, extra in providers:
+    if bearing_step_deg <= 0:
+        bearing_step_deg = 15
+    if outer_km <= inner_km:
+        outer_km = inner_km + 0.5
+
+    tower_height = float(tower_height_m or 0.0)
+    origin = (lat, lon)
+    lon_tx = lon * u.deg
+    lat_tx = lat * u.deg
+    srtm_dir = dem_directory or str(global_srtm_dir())
+    radials = []
+
+    def _fetch_profile(lon_rx, lat_rx):
         try:
-            resp = requests.get(url, params=params, timeout=15, **extra)
-            if resp.status_code == 404 and provider == 'open-meteo':
-                current_app.logger.info('geocoding.open_meteo.empty', extra={'lat': lat, 'lon': lon})
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            detail = None
-            if provider == 'open-meteo':
-                results = data.get('results') or []
-                if not results:
-                    continue
-                item = results[0]
-                state_name = item.get('admin1')
-                detail = {
-                    'name': item.get('name'),
-                    'state': state_name,
-                    'state_code': ibge_api.normalize_state_code(state_name),
-                    'country': item.get('country'),
-                    'provider': provider,
-                }
-            else:
-                address = data.get('address') or {}
-                state_label = address.get('state_code') or address.get('state')
-                detail = {
-                    'name': address.get('city') or address.get('town') or address.get('village') or address.get('municipality'),
-                    'state': address.get('state'),
-                    'state_code': ibge_api.normalize_state_code(state_label),
-                    'country': address.get('country'),
-                    'provider': provider,
-                }
-            if detail and include_ibge and detail.get('name'):
-                state_hint = detail.get('state_code') or detail.get('state')
-                detail['ibge_code'] = ibge_api.resolve_municipality_code(detail['name'], state_hint)
-            if detail and detail.get('name'):
-                return detail
+            with SrtmConf.set(srtm_dir=srtm_dir, download='none', server='viewpano'):
+                return pathprof.srtm_height_profile(
+                    lon_tx,
+                    lat_tx,
+                    lon_rx,
+                    lat_rx,
+                    step=max(50.0, profile_step_m) * u.m,
+                )
+        except Exception:
+            with SrtmConf.set(srtm_dir=srtm_dir, download='missing', server='viewpano'):
+                return pathprof.srtm_height_profile(
+                    lon_tx,
+                    lat_tx,
+                    lon_rx,
+                    lat_rx,
+                    step=max(50.0, profile_step_m) * u.m,
+                )
+
+    for bearing in range(0, 360, int(bearing_step_deg)):
+        destination = geodesic(kilometers=outer_km).destination(origin, bearing)
+        lon_rx = float(destination.longitude) * u.deg
+        lat_rx = float(destination.latitude) * u.deg
+        try:
+            profile = _fetch_profile(lon_rx, lat_rx)
         except Exception as exc:
-            current_app.logger.warning('Geocoding provider %s falhou: %s', provider, exc)
+            current_app.logger.warning('haat.profile_error', extra={'bearing': bearing, 'error': str(exc)})
             continue
-    return None
+
+        try:
+            _, _, _, distances, heights, *_ = profile
+        except (ValueError, TypeError):
+            continue
+
+        dist_km = np.asarray(distances.to(u.km).value, dtype=float)
+        ground_m = np.asarray(heights.to(u.m).value, dtype=float)
+        mask = (dist_km >= float(inner_km)) & (dist_km <= float(outer_km))
+        if not np.any(mask):
+            continue
+
+        avg_ground = float(np.nanmean(ground_m[mask]))
+        site_elevation = float(site_elevation_m) if site_elevation_m is not None else float(ground_m[0])
+        haat_value = (site_elevation + tower_height) - avg_ground
+
+        radials.append({
+            'bearing_deg': float(bearing),
+            'avg_terrain_m': round(avg_ground, 2),
+            'haat_m': round(haat_value, 2),
+        })
+
+    if not radials:
+        return [], None
+
+    haat_average = round(float(np.nanmean([item['haat_m'] for item in radials])), 2)
+    return radials, haat_average
+
+
+def _lookup_municipality_details(lat, lon, include_ibge=False):
+    params = {
+        'lat': lat,
+        'lon': lon,
+        'format': 'jsonv2',
+        'accept-language': 'pt-BR',
+    }
+    headers = {'User-Agent': 'ATXCoverage/1.0'}
+    try:
+        resp = requests.get('https://nominatim.openstreetmap.org/reverse', params=params, timeout=15, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+        address = data.get('address') or {}
+        city = address.get('city') or address.get('town') or address.get('village') or address.get('municipality')
+        if not city:
+            return None
+        state_label = address.get('state_code') or address.get('state')
+        detail = {
+            'name': city,
+            'state': address.get('state'),
+            'state_code': ibge_api.normalize_state_code(state_label),
+            'country': address.get('country'),
+            'provider': 'osm-nominatim',
+        }
+        if include_ibge:
+            state_hint = detail.get('state_code') or detail.get('state')
+            detail['ibge_code'] = ibge_api.resolve_municipality_code(detail['name'], state_hint)
+        return detail
+    except Exception as exc:
+        current_app.logger.warning('Geocoding provider osm-nominatim falhou: %s', exc)
+        return None
 
 
 def _lookup_municipality(lat, lon):
@@ -3580,6 +3649,32 @@ def _compute_rt3d_only_map(tx, data, include_arrays=False, label=None, rt3d_scen
     except (TypeError, ValueError):
         lon_tx_deg, lat_tx_deg = tx.longitude, tx.latitude
 
+    haat_radials = []
+    haat_average = None
+    try:
+        haat_radials, haat_average = _compute_haat_radials(
+            lat_tx_deg,
+            lon_tx_deg,
+            getattr(tx, 'tower_height', None),
+            getattr(tx, 'tx_site_elevation', None),
+            dem_directory=dem_directory,
+        )
+    except Exception:
+        haat_radials, haat_average = [], None
+
+    haat_radials: list[dict] = []
+    haat_average = None
+    try:
+        haat_radials, haat_average = _compute_haat_radials(
+            lat_tx_deg,
+            lon_tx_deg,
+            getattr(tx, 'tower_height', None),
+            getattr(tx, 'tx_site_elevation', None),
+            dem_directory=dem_directory,
+        )
+    except Exception:
+        haat_radials, haat_average = [], None
+
     radius_requested = _coerce_optional(data.get('radius'))
     if radius_requested is None or radius_requested <= 0:
         radius_requested = 10.0
@@ -3861,6 +3956,14 @@ def _compute_rt3d_only_map(tx, data, include_arrays=False, label=None, rt3d_scen
             "minimum_clearance_m": minimum_clearance_m,
         },
     }
+    if haat_radials:
+        payload['haat_radials'] = haat_radials
+    if haat_average is not None:
+        payload['haat_average_m'] = haat_average
+    if haat_radials:
+        payload['haat_radials'] = haat_radials
+    if haat_average is not None:
+        payload['haat_average_m'] = haat_average
     if tile_min_zoom is not None and tile_max_zoom is not None:
         payload["tile_zoom"] = {"min": int(tile_min_zoom), "max": int(tile_max_zoom)}
     if tile_stats_payload:
@@ -3915,6 +4018,11 @@ def _persist_coverage_artifacts(user, project, engine_value, request_payload, co
             return b''
         return base64.b64decode(data_str)
 
+    def _encode_blob(blob):
+        if not blob:
+            return None
+        return base64.b64encode(blob).decode('utf-8')
+
     images_payload = coverage_payload.get('images') or {}
     selected_image = None
     selected_unit = None
@@ -3966,6 +4074,12 @@ def _persist_coverage_artifacts(user, project, engine_value, request_payload, co
         "rt3d_rays": _clean_json(coverage_payload.get('rt3dRays')),
         "rt3d_settings": _clean_json(coverage_payload.get('rt3dSettings')),
     }
+    if coverage_payload.get('haat_radials'):
+        summary_payload["haat_radials"] = _clean_json(coverage_payload.get('haat_radials'))
+    if coverage_payload.get('haat_average_m') is not None:
+        summary_payload["haat_average_m"] = _clean_json(coverage_payload.get('haat_average_m'))
+    summary_payload["diagram_horizontal_b64"] = _encode_blob(getattr(user, 'antenna_pattern_img_dia_H', None))
+    summary_payload["diagram_vertical_b64"] = _encode_blob(getattr(user, 'antenna_pattern_img_dia_V', None))
     ibge_registry = {}
     if receivers_payload:
         for receiver in receivers_payload:
@@ -4294,6 +4408,9 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None, dem_direct
 
     if data.get('coverageEngine') == CoverageEngine.rt3d.value:
         return _compute_rt3d_only_map(tx, data, include_arrays, label, rt3d_scene)
+
+    haat_radials: list[dict] = []
+    haat_average = None
 
     # -------------------------------------------------
     # helpers internos
@@ -5050,6 +5167,11 @@ def _compute_coverage_map(tx, data, include_arrays=False, label=None, dem_direct
         "signal_level_dict_dbm": signal_level_dict_dbm,
     }
 
+    if haat_radials:
+        payload['haat_radials'] = haat_radials
+    if haat_average is not None:
+        payload['haat_average_m'] = haat_average
+
     if label is not None:
         payload["label"] = str(label)
 
@@ -5629,6 +5751,10 @@ def carregar_dados():
             user_data['receiverBookmarks'] = receiver_bookmarks
         else:
             user_data['receiverBookmarks'] = []
+
+        if user_data.get('antennaGain') is not None:
+            converted_gain = _gain_dbi_to_dbd(user_data['antennaGain'])
+            user_data['antennaGain'] = converted_gain if converted_gain is not None else user_data['antennaGain']
 
         return jsonify(user_data), 200
     except Exception as e:

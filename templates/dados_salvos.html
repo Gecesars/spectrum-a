@@ -22,7 +22,8 @@
                 <div class="col-sm-6 col-lg-3"><strong>Ambiente:</strong> {{ dados_salvos.propagation_model or '—' }}</div>
                 <div class="col-sm-6 col-lg-3"><strong>Frequência:</strong> {{ dados_salvos.frequencia or '—' }} MHz</div>
                 <div class="col-sm-6 col-lg-3"><strong>Potência TX:</strong> {{ dados_salvos.transmission_power or '—' }} W</div>
-                <div class="col-sm-6 col-lg-3"><strong>Ganho antena:</strong> {{ dados_salvos.antenna_gain or '—' }} dBi</div>
+                {% set gain_dbd = dados_salvos.antenna_gain - 2.15 if dados_salvos.antenna_gain is not none else None %}
+                <div class="col-sm-6 col-lg-3"><strong>Ganho antena:</strong> {{ gain_dbd|round(2) if gain_dbd is not none else '—' }} dBd</div>
                 <div class="col-sm-6 col-lg-3"><strong>Perdas sistema:</strong> {{ dados_salvos.total_loss or '—' }} dB</div>
                 <div class="col-sm-6 col-lg-3"><strong>Altitude TX:</strong> {{ dados_salvos.tx_site_elevation or '—' }} m</div>
                 <div class="col-sm-6 col-lg-3"><strong>Coordenadas:</strong> {{ dados_salvos.latitude or '—' }}, {{ dados_salvos.longitude or '—' }}</div>
@@ -53,8 +54,6 @@
                         {% set center_metrics = card.center_metrics %}
                         {% if center_metrics %}
                             <ul class="list-unstyled small text-muted mb-3">
-                                <li><strong>Campo no centro:</strong> {{ center_metrics.field_center_dbuv_m|round(2) if center_metrics.field_center_dbuv_m is not none else '—' }} dBµV/m</li>
-                                <li><strong>Potência RX:</strong> {{ center_metrics.received_power_center_dbm|round(2) if center_metrics.received_power_center_dbm is not none else '—' }} dBm</li>
                             </ul>
                         {% endif %}
                         <div class="mt-auto d-flex gap-2">

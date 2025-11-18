@@ -161,9 +161,21 @@
         lastSavedOutput.textContent = date.toLocaleString();
     }
 
+    const GAIN_OFFSET_DBD = 2.15;
+
     function parseNumber(value) {
         const number = parseFloat(value);
         return Number.isFinite(number) ? number : null;
+    }
+
+    function dbiToDbd(value) {
+        const num = Number(value);
+        return Number.isFinite(num) ? num - GAIN_OFFSET_DBD : null;
+    }
+
+    function dbdToDbi(value) {
+        const num = Number(value);
+        return Number.isFinite(num) ? num + GAIN_OFFSET_DBD : null;
     }
 
     function setFieldValue(id, value) {
@@ -316,7 +328,8 @@
             setSelectValue('p452Version', data.p452Version ? String(data.p452Version) : '');
             setFieldValue('frequency', data.frequency);
             setFieldValue('transmissionPower', data.transmissionPower);
-            setFieldValue('antennaGain', data.antennaGain);
+            const displayGain = dbiToDbd(data.antennaGain);
+            setFieldValue('antennaGain', displayGain !== null ? displayGain : data.antennaGain);
             setFieldValue('rxGain', data.rxGain);
             setFieldValue('antennaTilt', data.antennaTilt);
             setFieldValue('antennaDirection', data.antennaDirection);
@@ -386,6 +399,7 @@
     }
 
     function collectPayload() {
+        const gainInput = parseNumber(document.getElementById('antennaGain')?.value);
         const payload = {
             propagationModel: document.getElementById('propagationModel')?.value || null,
             serviceType: document.getElementById('serviceType')?.value || null,
@@ -395,7 +409,7 @@
             p452Version: document.getElementById('p452Version')?.value || null,
             frequency: parseNumber(document.getElementById('frequency')?.value),
             transmissionPower: parseNumber(document.getElementById('transmissionPower')?.value),
-            antennaGain: parseNumber(document.getElementById('antennaGain')?.value),
+            antennaGain: gainInput !== null ? dbdToDbi(gainInput) : null,
             rxGain: parseNumber(document.getElementById('rxGain')?.value),
             antennaTilt: parseNumber(document.getElementById('antennaTilt')?.value),
             antennaDirection: parseNumber(document.getElementById('antennaDirection')?.value),

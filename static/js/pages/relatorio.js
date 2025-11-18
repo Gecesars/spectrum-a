@@ -16,6 +16,9 @@
     const statusBanner = document.getElementById('reportStatusBanner');
     const generateBtn = document.getElementById('generatePdfBtn');
     const linkSummaryBlock = document.getElementById('linkSummaryBlock');
+    const logoInput = document.getElementById('companyLogoInput');
+    const logoPreview = document.getElementById('companyLogoPreview');
+    const logoRemoveBtn = document.getElementById('companyLogoRemoveBtn');
 
     const fields = {
         headerColor: document.getElementById('inputHeaderColor'),
@@ -34,6 +37,7 @@
         headerColor: '#0d47a1',
         projectNotes: '',
         contextLoaded: false,
+        companyLogo: null,
     };
 
     const notify = (message, variant = 'info') => {
@@ -96,6 +100,7 @@
         state.recommendations = Array.isArray(state.aiSections.recommendations)
             ? state.aiSections.recommendations.slice()
             : [];
+        state.companyLogo = data.branding?.company_logo || null;
 
         fields.headerColor.value = state.headerColor;
         fields.projectNotes.value = state.projectNotes;
@@ -122,6 +127,15 @@
         if (profileImg && data.diagram_images?.perfil) {
             profileImg.src = data.diagram_images.perfil;
         }
+        if (logoPreview) {
+            if (state.companyLogo) {
+                logoPreview.src = state.companyLogo;
+                logoPreview.classList.remove('d-none');
+            } else {
+                logoPreview.src = '';
+                logoPreview.classList.add('d-none');
+            }
+        }
 
         renderRecommendations();
         renderReceiverSummary(data.receiver_summary);
@@ -130,6 +144,34 @@
         }
         if (statusBanner) statusBanner.classList.add('d-none');
         app.classList.remove('d-none');
+    };
+
+    const uploadCompanyLogo = async (dataUrl) => {
+        try {
+            const response = await fetch('/api/reports/logo', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ project: projectSlug, logo: dataUrl }),
+            });
+            const payload = await response.json();
+            if (!response.ok) {
+                throw new Error(payload.error || 'Não foi possível atualizar o logo.');
+            }
+            state.companyLogo = payload.company_logo || null;
+            if (logoPreview) {
+                if (state.companyLogo) {
+                    logoPreview.src = state.companyLogo;
+                    logoPreview.classList.remove('d-none');
+                } else {
+                    logoPreview.src = '';
+                    logoPreview.classList.add('d-none');
+                }
+            }
+            notify('Logo atualizado com sucesso.', 'success');
+        } catch (error) {
+            notify(error.message || 'Erro ao atualizar o logo.', 'danger');
+        }
     };
 
     const gatherOverrides = () => {
@@ -211,6 +253,26 @@
             } finally {
                 toggleLoading(false);
             }
+        });
+    }
+
+    if (logoInput) {
+        logoInput.addEventListener('change', (event) => {
+            const file = event.target.files?.[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = () => {
+                if (reader.result) {
+                    uploadCompanyLogo(reader.result.toString());
+                }
+            };
+            reader.readAsDataURL(file);
+        });
+    }
+
+    if (logoRemoveBtn) {
+        logoRemoveBtn.addEventListener('click', () => {
+            uploadCompanyLogo(null);
         });
     }
 

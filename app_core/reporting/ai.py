@@ -40,29 +40,26 @@ Contexto:
 - Serviço: {service} / Classe {service_class}
 - Região: {location}
 - Engine: {engine}
-- Clima: {climate} / caso não seja passado busque o clima para location
+- Clima: {climate}
 - Notas do projeto: {project_notes}
 - Pico a pico horizontal (máximo - mínimo do diagrama): {horizontal_peak_to_peak_db} dB
+- Apenas os dois principais receptores foram fornecidos para análise automática; os demais permanecem descritos no relatório.
 - Receptores avaliados (resumo):
 {link_summary}
 - Receptores detalhados (JSON):
 {link_payload}
 - Potência do Transmissor (Entrada): {tx_power_w} W
-- Ganho da Antena (Entrada): {antenna_gain_dbi} dBi
+- Ganho da Antena (Entrada): {antenna_gain_dbd} dBd (equivalente a {antenna_gain_dbi} dBi)
 - Perdas (Entrada): {losses_db} dB
 
 Parâmetros principais:
 - Raio planejado: {radius_km} km
 - Frequência: {frequency_mhz} MHz
 - Polarização: {polarization}
-- Campo no centro: {field_center} dBµV/m
-- Potência RX: {rx_power} dBm
-- Perda combinada: {loss_center} dB
-- Ganho efetivo: {gain_center} dB
 
 Requisitos:
 - overview: Inicie a string OBRIGATORIAME com o histórico de cálculo da ERP, formatado exatamente assim (substitua X, Y, Z, A, B pelos valores calculados com precisão):
-  "Cálculo ERP: [P_tx: 10*log10({tx_power_w}) = X dBW] + [G_ant: {antenna_gain_dbi}dBi - 2.15 = Y dBd] - [Perdas: {losses_db} dB] = [ERP: Z dBW / A dBm / B kW]."
+  "Cálculo ERP: [P_tx: 10*log10({tx_power_w}) = X dBW] + [G_ant: {antenna_gain_dbd} dBd (={antenna_gain_dbi} dBi)] - [Perdas: {losses_db} dB] = [ERP: Z dBW / A dBm / B kW]."
   Este valor "A" (em dBm) é a ERP de referência.
   Após o cálculo, insira um caractere de nova linha (use `\n`) e continue com o resumo executivo (até 7 frases) usando a ERP calculada.
 - coverage: Análise da mancha/cobertura, validando a cobertura contra a ERP calculada (Z dBW) e o {radius_km}.
@@ -127,10 +124,6 @@ def build_ai_summary(
         radius_km=metrics.get("radius_km") or "—",
         frequency_mhz=metrics.get("frequency_mhz") or "—",
         polarization=metrics.get("polarization") or "—",
-        field_center=metrics.get("field_center") or "—",
-        rx_power=metrics.get("rx_power") or "—",
-        loss_center=metrics.get("loss_center") or "—",
-        gain_center=metrics.get("gain_center") or "—",
         engine=snapshot.get("engine") or "—",
         climate=metrics.get("climate") or "Não informado",
         project_notes=metrics.get("project_notes") or "Sem notas registradas.",
@@ -141,6 +134,7 @@ def build_ai_summary(
         # Elas leem do dict 'metrics' e passam para o prompt
         tx_power_w=metrics.get("tx_power_w") or "0",
         antenna_gain_dbi=metrics.get("antenna_gain_dbi") or "0",
+        antenna_gain_dbd=metrics.get("antenna_gain_dbd") or "0",
         losses_db=metrics.get("losses_db") or "0"
     )
 

@@ -26,9 +26,75 @@ from app_core.analytics.coverage_ibge import summarize_coverage_demographics
 
 MIN_RECEIVER_POWER_DBM = -80.0
 MIN_FIELD_DBUV = 25.0
-MAX_RECEIVER_ROWS = 8
+MAX_RECEIVER_ROWS = None
 MAX_POP_LOOKUPS = 5
 DEFAULT_HEADER_COLOR = "#0d47a1"
+GAIN_OFFSET_DBI_DBD = 2.15
+
+CLIMATE_STATE_MAP = {
+    "AC": "Equatorial úmido",
+    "AM": "Equatorial úmido",
+    "AP": "Equatorial úmido",
+    "PA": "Equatorial úmido",
+    "RO": "Equatorial quente",
+    "RR": "Equatorial úmido",
+    "TO": "Tropical sazonal",
+    "MA": "Tropical úmido",
+    "PI": "Semiárido",
+    "CE": "Semiárido",
+    "RN": "Semiárido",
+    "PB": "Semiárido",
+    "PE": "Tropical úmido",
+    "AL": "Tropical úmido",
+    "SE": "Tropical úmido",
+    "BA": "Tropical semiárido",
+    "MT": "Tropical continental",
+    "MS": "Tropical continental",
+    "GO": "Tropical sazonal",
+    "DF": "Tropical de altitude",
+    "MG": "Tropical de altitude",
+    "ES": "Tropical litorâneo",
+    "RJ": "Tropical úmido",
+    "SP": "Tropical de altitude",
+    "PR": "Subtropical úmido",
+    "SC": "Subtropical úmido",
+    "RS": "Subtropical úmido",
+}
+
+FM_CLASS_TABLE = [
+    {"label": "C", "max_erp_kw": 0.3, "max_haat_m": 60, "contour_km": 7.5},
+    {"label": "B2", "max_erp_kw": 1.0, "max_haat_m": 90, "contour_km": 12.5},
+    {"label": "B1", "max_erp_kw": 3.0, "max_haat_m": 90, "contour_km": 16.5},
+    {"label": "A4", "max_erp_kw": 5.0, "max_haat_m": 150, "contour_km": 24.0},
+    {"label": "A3", "max_erp_kw": 15.0, "max_haat_m": 150, "contour_km": 30.0},
+    {"label": "A2", "max_erp_kw": 30.0, "max_haat_m": 150, "contour_km": 35.0},
+    {"label": "A1", "max_erp_kw": 50.0, "max_haat_m": 150, "contour_km": 38.5},
+    {"label": "E3", "max_erp_kw": 60.0, "max_haat_m": 300, "contour_km": 54.5},
+    {"label": "E2", "max_erp_kw": 75.0, "max_haat_m": 450, "contour_km": 67.5},
+    {"label": "E1", "max_erp_kw": 100.0, "max_haat_m": 600, "contour_km": 78.5},
+]
+
+TV_CLASS_TABLE = {
+    "vhf": [
+        {"label": "C", "max_erp_kw": 0.016, "max_haat_m": 150, "contour_km": 20.2},
+        {"label": "B", "max_erp_kw": 0.16, "max_haat_m": 150, "contour_km": 32.3},
+        {"label": "A", "max_erp_kw": 1.6, "max_haat_m": 150, "contour_km": 47.9},
+        {"label": "Especial", "max_erp_kw": 16.0, "max_haat_m": 150, "contour_km": 65.6},
+    ],
+    "uhf": [
+        {"label": "C", "max_erp_kw": 0.08, "max_haat_m": 150, "contour_km": 18.1},
+        {"label": "B", "max_erp_kw": 0.8, "max_haat_m": 150, "contour_km": 29.1},
+        {"label": "A", "max_erp_kw": 8.0, "max_haat_m": 150, "contour_km": 42.5},
+        {"label": "Especial", "max_erp_kw": 80.0, "max_haat_m": 150, "contour_km": 58.0},
+    ],
+    "uhf_high": [
+        {"label": "C", "max_erp_kw": 0.08, "max_haat_m": 150, "contour_km": 18.1},
+        {"label": "B", "max_erp_kw": 0.8, "max_haat_m": 150, "contour_km": 29.1},
+        {"label": "A", "max_erp_kw": 8.0, "max_haat_m": 150, "contour_km": 42.5},
+        {"label": "Especial", "max_erp_kw": 100.0, "max_haat_m": 150, "contour_km": 58.0},
+    ],
+}
+
 
 
 class AnalysisReportError(RuntimeError):
@@ -51,6 +117,162 @@ def _format_number(value, unit=""):
     else:
         formatted = str(value)
     return f"{formatted} {unit}".strip()
+
+
+def _safe_float(value) -> float | None:
+    try:
+        if value in (None, "", []):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _gain_dbi_to_dbd(value):
+    num = _safe_float(value)
+    if num is None:
+        return None
+    return num - GAIN_OFFSET_DBI_DBD
+
+
+def _decode_inline_image(value) -> bytes | None:
+    if not value:
+        return None
+    if isinstance(value, dict):
+        data = value.get('data')
+    else:
+        data = value
+    if isinstance(data, (bytes, bytearray)):
+        return bytes(data)
+    if not isinstance(data, str):
+        return None
+    payload = data.split(',', 1)[-1] if 'base64,' in data else data
+    try:
+        return base64.b64decode(payload)
+    except Exception:
+        return None
+
+
+def _project_company_logo(project: Project) -> bytes | None:
+    settings = project.settings or {}
+    logo_meta = settings.get('reportLogo')
+    return _decode_inline_image(logo_meta)
+
+
+def _infer_state_code(project: Project, snapshot: Dict[str, Any]) -> str | None:
+    settings = project.settings or {}
+    candidate = settings.get('state') or settings.get('uf')
+    if not candidate:
+        location_label = snapshot.get('tx_location_name') or settings.get('tx_location_name') or getattr(project.user, 'tx_location_name', None)
+        if location_label:
+            parts = [part.strip() for part in str(location_label).split(',') if part.strip()]
+            if len(parts) >= 2:
+                candidate = parts[1]
+    if not candidate:
+        return None
+    return ibge_api.normalize_state_code(candidate)
+
+
+def _climate_from_latitude(lat: float | None) -> str | None:
+    if lat is None:
+        return None
+    try:
+        lat_abs = abs(float(lat))
+    except (TypeError, ValueError):
+        return None
+    if lat_abs <= 5.0:
+        return "Clima equatorial"
+    if lat_abs <= 18.0:
+        return "Clima tropical úmido"
+    if lat_abs <= 23.5:
+        return "Clima tropical"
+    if lat_abs <= 32.0:
+        return "Clima tropical com invernos amenos"
+    if lat_abs <= 40.0:
+        return "Clima subtropical"
+    return "Clima temperado"
+
+
+def _infer_climate_descriptor(project: Project, snapshot: Dict[str, Any]) -> str | None:
+    state_code = _infer_state_code(project, snapshot)
+    location_name = snapshot.get('tx_location_name') or (project.settings or {}).get('tx_location_name') or getattr(project.user, 'tx_location_name', None)
+    climate_label = CLIMATE_STATE_MAP.get(state_code)
+    if not climate_label:
+        center = snapshot.get('center') or {}
+        lat = center.get('lat')
+        if lat is None:
+            lat = getattr(project.user, 'latitude', None)
+        climate_label = _climate_from_latitude(lat)
+    if climate_label and location_name:
+        return f"{climate_label} — {location_name}"
+    return climate_label
+
+
+def _tv_band_for_frequency(freq_mhz: float | None) -> str:
+    if freq_mhz is None:
+        return 'uhf'
+    try:
+        freq = float(freq_mhz)
+    except (TypeError, ValueError):
+        return 'uhf'
+    if freq < 470.0:
+        return 'vhf'
+    if freq >= 668.0:
+        return 'uhf_high'
+    return 'uhf'
+
+
+def _dbm_to_kw(value: float | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        mw = 10 ** ((float(value)) / 10.0)
+    except (TypeError, ValueError):
+        return None
+    kw = mw / 1_000_000.0
+    return max(kw, 0.0)
+
+
+def _classify_station(service_label, frequency_mhz, erp_dbm, haat_m):
+    erp_kw = _dbm_to_kw(_safe_float(erp_dbm))
+    haat_value = _safe_float(haat_m)
+    if erp_kw is None or haat_value is None:
+        return {
+            'label': None,
+            'erp_kw': erp_kw,
+            'haat_m': haat_value,
+        }
+    service_key = (service_label or '').lower()
+    if 'tv' in service_key or 'rtvd' in service_key or 'gtvd' in service_key:
+        band = _tv_band_for_frequency(_safe_float(frequency_mhz))
+        table = TV_CLASS_TABLE.get(band, TV_CLASS_TABLE['uhf'])
+        category = 'TV Digital'
+    else:
+        table = FM_CLASS_TABLE
+        category = 'FM'
+    selected = None
+    for entry in table:
+        if erp_kw <= entry['max_erp_kw'] + 1e-9 and haat_value <= entry['max_haat_m'] + 1e-6:
+            selected = entry
+            break
+    if not selected:
+        return {
+            'label': 'Fora do plano básico',
+            'category': category,
+            'erp_kw': erp_kw,
+            'haat_m': haat_value,
+            'limits': table[-1],
+            'contour_km': table[-1].get('contour_km'),
+            'reason': 'ERP/HAAT excedem os limites regulamentares.',
+        }
+    return {
+        'label': selected['label'],
+        'category': category,
+        'erp_kw': erp_kw,
+        'haat_m': haat_value,
+        'limits': selected,
+        'contour_km': selected.get('contour_km'),
+    }
 
 
 
@@ -247,6 +469,18 @@ def _blob_to_data_uri(blob: bytes | None) -> str | None:
         return None
 
 
+def _draw_header_logo(c: canvas.Canvas, blob: bytes | None, x: float, y: float, max_width: float = 70.0, max_height: float = 60.0):
+    if not blob:
+        return
+    try:
+        reader = ImageReader(io.BytesIO(blob))
+        width, height = reader.getSize()
+        ratio = min(max_width / width, max_height / height)
+        c.drawImage(reader, x, y, width=width * ratio, height=height * ratio, mask='auto')
+    except Exception:
+        return
+
+
 def _render_receiver_profile_plot(receiver: Dict[str, Any]) -> bytes | None:
     asset_blob = _load_profile_asset(receiver)
     if asset_blob:
@@ -316,6 +550,31 @@ def _load_profile_asset(receiver: Dict[str, Any]) -> bytes | None:
         except Exception:
             return None
     return None
+
+
+def _profile_info_from_meta(meta: Dict[str, Any] | None) -> list[str]:
+    if not isinstance(meta, dict) or not meta:
+        return []
+    lines = []
+    distance = meta.get('distance_km')
+    if distance is not None:
+        try:
+            lines.append(f"Distância TX→RX: {float(distance):.2f} km")
+        except (TypeError, ValueError):
+            pass
+    erp_dbm = meta.get('erp_dbm')
+    if erp_dbm is not None:
+        lines.append(f"ERP na direção: {_format_number(erp_dbm, ' dBm')}")
+    rx_power = meta.get('rx_power_dbm')
+    if rx_power is not None:
+        lines.append(f"Potência recebida estimada: {_format_number(rx_power, ' dBm')}")
+    field_val = meta.get('field_dbuv_m')
+    if field_val is not None:
+        lines.append(f"Campo estimado no RX: {_format_number(field_val, ' dBµV/m')}")
+    obstacles = meta.get('obstacles')
+    if obstacles:
+        lines.append(f"Obstáculos na 1ª Fresnel: {obstacles}")
+    return lines
 
 
 def _build_link_summary(receivers: list[Dict[str, Any]]) -> tuple[str, list[Dict[str, Any]]]:
@@ -489,24 +748,20 @@ def _format_user_climate(user) -> str | None:
 def _build_metrics(project: Project, snapshot: Dict[str, Any], center_metrics: Dict[str, Any]) -> Dict[str, Any]:
     settings = project.settings or {}
     user = project.user
-    power_w = getattr(user, "transmission_power", None)
-    # === DADOS PARA O CÁLCULO DA ERP ===
-    power_w = getattr(user, "transmission_power", 0)
-    gain_dbi = getattr(user, "antenna_gain", 0)
-    loss_db = getattr(user, "total_loss", 0)
-    # =====================================
-    erp_dbm = None
-    if power_w not in (None, ""):
+    power_w = _safe_float(getattr(user, "transmission_power", None))
+    gain_dbi = _safe_float(getattr(user, "antenna_gain", None))
+    loss_db = _safe_float(getattr(user, "total_loss", None))
+    tx_power_dbm = None
+    if power_w is not None:
         try:
-            erp_dbm = 10 * math.log10(max(float(power_w), 1e-6) * 1000.0)
-        except (TypeError, ValueError):
-            erp_dbm = None
-    climate_text = (
-        settings.get("clima")
-        or snapshot.get("climate_status")
-        or _format_user_climate(user)
-        or "Não informado"
-    )
+            tx_power_dbm = 10 * math.log10(max(power_w, 1e-6) * 1000.0)
+        except (ValueError, OverflowError):
+            tx_power_dbm = None
+    erp_dbm = None
+    if tx_power_dbm is not None:
+        erp_dbm = tx_power_dbm + (gain_dbi or 0.0) - (loss_db or 0.0)
+    climate_text = _infer_climate_descriptor(project, snapshot) or "Clima não informado"
+    haat_average = snapshot.get('haat_average_m')
     return {
         "service": settings.get("serviceType") or getattr(user, "servico", "Radiodifusão"),
         "service_class": settings.get("serviceClass") or settings.get("classe") or "—",
@@ -515,16 +770,13 @@ def _build_metrics(project: Project, snapshot: Dict[str, Any], center_metrics: D
         "radius_km": snapshot.get("radius_km") or snapshot.get("requested_radius_km"),
         "frequency_mhz": getattr(user, "frequencia", None),
         "polarization": getattr(user, "polarization", None),
-        "field_center": center_metrics.get("field_center_dbuv_m"),
-        "rx_power": center_metrics.get("received_power_center_dbm"),
-        "loss_center": center_metrics.get("combined_loss_center_db"),
-        "gain_center": center_metrics.get("effective_gain_center_db"),
         "horizontal_peak_to_peak_db": _horizontal_peak_to_peak_db(user),
         "climate": climate_text,
-        # === CHAVES ADICIONADAS QUE CAUSAVAM O ERRO ===
         "tx_power_w": power_w,
         "antenna_gain_dbi": gain_dbi,
-        "losses_db": loss_db
+        "antenna_gain_dbd": _gain_dbi_to_dbd(gain_dbi),
+        "losses_db": loss_db,
+        "haat_average_m": _safe_float(haat_average),
     }
 
 
@@ -570,6 +822,8 @@ def _collect_receiver_entries(snapshot: Dict[str, Any], limit: int | None = MAX_
         demographics = ibge_info.get('demographics')
         if isinstance(demographics, dict) and demographics.get('total') is None:
             demographics = None
+        profile_meta = rx.get('profile_meta') or {}
+        profile_info = rx.get('profile_info') or rx.get('profile_info_lines')
         entries.append({
             "label": rx.get('label') or rx.get('name') or f"RX {len(entries) + 1}",
             "municipality": municipality,
@@ -582,6 +836,12 @@ def _collect_receiver_entries(snapshot: Dict[str, Any], limit: int | None = MAX_
             "meets_field_min": field is not None and field >= MIN_FIELD_DBUV,
             "demographics": demographics,
             "ibge_code": ibge_info.get('code') or ibge_info.get('ibge_code'),
+            "profile": rx.get('profile') or {},
+            "profile_meta": profile_meta,
+            "profile_info": profile_info,
+            "profile_asset_path": rx.get('profile_asset_path'),
+            "profile_asset_id": rx.get('profile_asset_id'),
+            "profile_asset_url": rx.get('profile_asset_url'),
         })
     entries.sort(
         key=lambda item: item['power_dbm'] if item.get('power_dbm') is not None else MIN_RECEIVER_POWER_DBM,
@@ -592,7 +852,16 @@ def _collect_receiver_entries(snapshot: Dict[str, Any], limit: int | None = MAX_
     return entries[:limit]
 
 
-def _start_page(c: canvas.Canvas, width: float, height: float, title: str, subtitle: str, theme_color: str = DEFAULT_HEADER_COLOR) -> int:
+def _start_page(
+    c: canvas.Canvas,
+    width: float,
+    height: float,
+    title: str,
+    subtitle: str,
+    theme_color: str = DEFAULT_HEADER_COLOR,
+    *,
+    company_logo: bytes | None = None,
+) -> int:
     try:
         color_value = colors.HexColor(theme_color)
     except Exception:
@@ -600,10 +869,15 @@ def _start_page(c: canvas.Canvas, width: float, height: float, title: str, subti
     c.setFillColor(color_value)
     c.rect(0, height - 80, width, 80, fill=1, stroke=0)
     c.setFillColor(colors.white)
+    if company_logo:
+        _draw_header_logo(c, company_logo, 34, height - 75)
+        text_x = 120
+    else:
+        text_x = 40
     c.setFont('Helvetica-Bold', 20)
-    c.drawString(40, height - 45, title)
+    c.drawString(text_x, height - 45, title)
     c.setFont('Helvetica', 11)
-    c.drawString(40, height - 65, subtitle)
+    c.drawString(text_x, height - 65, subtitle)
     c.setFillColor(colors.black)
     return height - 110
 
@@ -617,10 +891,19 @@ def _ensure_space(
     title: str,
     subtitle: str,
     theme_color: str = DEFAULT_HEADER_COLOR,
+    company_logo: bytes | None = None,
 ) -> float:
     if y - required < 70:
         c.showPage()
-        return _start_page(c, width, height, title, subtitle, theme_color)
+        return _start_page(
+            c,
+            width,
+            height,
+            title,
+            subtitle,
+            theme_color,
+            company_logo=company_logo,
+        )
     return y
 
 
@@ -636,6 +919,7 @@ def _draw_table(
     empty_message: str | None = None,
     line_height: int = 14,
     theme_color: str = DEFAULT_HEADER_COLOR,
+    company_logo: bytes | None = None,
 ) -> float:
     if not rows:
         if empty_message:
@@ -657,7 +941,15 @@ def _draw_table(
     for row in rows:
         if y < 80:
             c.showPage()
-            y = _start_page(c, width, height, continuation_title, project_slug, theme_color) - 20
+            y = _start_page(
+                c,
+                width,
+                height,
+                continuation_title,
+                project_slug,
+                theme_color,
+                company_logo=company_logo,
+            ) - 20
             y = _draw_header(y)
             c.setFont('Helvetica', 9)
         x = 40
@@ -673,6 +965,7 @@ def build_analysis_preview(project: Project, *, allow_ibge: bool = True) -> Dict
     snapshot = _latest_snapshot(project)
     user = project.user
     settings = project.settings or {}
+    company_logo_blob = _project_company_logo(project)
     center_metrics = snapshot.get('center_metrics') or {}
     loss_components = snapshot.get('loss_components') or {}
     gain_components = snapshot.get('gain_components') or {}
@@ -690,15 +983,22 @@ def build_analysis_preview(project: Project, *, allow_ibge: bool = True) -> Dict
     metrics['link_summary'] = link_summary_text
     metrics['coverage_ibge'] = coverage_ibge
 
+    saved_horizontal = _decode_inline_image(snapshot.get('diagram_horizontal_b64'))
+    saved_vertical = _decode_inline_image(snapshot.get('diagram_vertical_b64'))
     diagram_images = {
         "mancha_de_cobertura": _read_storage_blob(snapshot.get('asset_path')),
         "perfil": getattr(user, "perfil_img", None),
-        "diagrama_horizontal": getattr(user, "antenna_pattern_img_dia_H", None),
-        "diagrama_vertical": getattr(user, "antenna_pattern_img_dia_V", None),
+        "diagrama_horizontal": saved_horizontal or getattr(user, "antenna_pattern_img_dia_H", None),
+        "diagrama_vertical": saved_vertical or getattr(user, "antenna_pattern_img_dia_V", None),
     }
 
+    limited_payload = link_payload[:2]
+    summary_lines = link_summary_text.splitlines()
+    limited_summary_text = "\n".join(summary_lines[:len(limited_payload)]) if limited_payload else "Nenhum receptor selecionado."
+    ai_metrics = dict(metrics)
+    ai_metrics['link_summary'] = limited_summary_text
     try:
-        ai_sections = build_ai_summary(project, snapshot, metrics, diagram_images, links_payload=link_payload)
+        ai_sections = build_ai_summary(project, snapshot, ai_metrics, diagram_images, links_payload=limited_payload)
     except (AIUnavailable, AISummaryError) as exc:
         raise AnalysisReportError(str(exc)) from exc
 
@@ -707,6 +1007,19 @@ def build_analysis_preview(project: Project, *, allow_ibge: bool = True) -> Dict
         snapshot,
         allow_remote_lookup=allow_ibge,
     )
+    haat_radials = snapshot.get('haat_radials') or []
+    classification = _classify_station(
+        metrics.get('service'),
+        metrics.get('frequency_mhz'),
+        metrics.get('erp_dbm'),
+        metrics.get('haat_average_m'),
+    )
+    if classification.get('label'):
+        metrics['service_class'] = classification['label']
+    metrics['classification'] = classification
+    metrics['contour_distance_km'] = classification.get('contour_km')
+    metrics['contour_distance_km'] = classification.get('contour_km')
+    metrics['haat_radials'] = haat_radials
 
     heatmap_url = None
     colorbar_url = None
@@ -743,12 +1056,24 @@ def build_analysis_preview(project: Project, *, allow_ibge: bool = True) -> Dict
             'perfil': _blob_to_data_uri(diagram_images.get('perfil')),
             'diagrama_horizontal': _blob_to_data_uri(diagram_images.get('diagrama_horizontal')),
             'diagrama_vertical': _blob_to_data_uri(diagram_images.get('diagrama_vertical')),
+            'company_logo': _blob_to_data_uri(company_logo_blob),
         },
         'header_color': DEFAULT_HEADER_COLOR,
         'notes': metrics['project_notes'],
         'ibge_registry': snapshot.get('ibge_registry'),
         'link_summary': link_summary_text,
         'link_payload': link_payload,
+        'branding': {
+            'company_logo': _blob_to_data_uri(company_logo_blob),
+        },
+        'regulatory': {
+            'classification': classification,
+            'haat_radials': haat_radials,
+        },
+        'haat': {
+            'average_m': metrics.get('haat_average_m'),
+            'radials': haat_radials,
+        },
     }
 
 def _format_int(value) -> str:
@@ -820,18 +1145,37 @@ def generate_analysis_report(
         if candidate.exists():
             coverage_image_path = candidate
 
+    saved_horizontal = _decode_inline_image(snapshot.get('diagram_horizontal_b64'))
+    saved_vertical = _decode_inline_image(snapshot.get('diagram_vertical_b64'))
     diagram_images = {
         "mancha_de_cobertura": _read_storage_blob(coverage_rel_path),
         "perfil": getattr(user, "perfil_img", None),
-        "diagrama_horizontal": getattr(user, "antenna_pattern_img_dia_H", None),
-        "diagrama_vertical": getattr(user, "antenna_pattern_img_dia_V", None),
+        "diagrama_horizontal": saved_horizontal or getattr(user, "antenna_pattern_img_dia_H", None),
+        "diagrama_vertical": saved_vertical or getattr(user, "antenna_pattern_img_dia_V", None),
     }
+    haat_radials = snapshot.get('haat_radials') or []
+    classification = _classify_station(
+        metrics.get('service'),
+        metrics.get('frequency_mhz'),
+        metrics.get('erp_dbm'),
+        metrics.get('haat_average_m'),
+    )
+    if classification.get('label'):
+        metrics['service_class'] = classification['label']
+    metrics['classification'] = classification
+    metrics['haat_radials'] = haat_radials
+
     provided_sections = overrides.get('ai_sections')
     if provided_sections:
         ai_sections = dict(provided_sections)
     else:
+        limited_payload = link_payload[:2]
+        summary_lines = link_summary_text.splitlines()
+        limited_summary_text = "\n".join(summary_lines[:len(limited_payload)]) if limited_payload else "Nenhum receptor selecionado."
+        ai_metrics = dict(metrics)
+        ai_metrics['link_summary'] = limited_summary_text
         try:
-            ai_sections = build_ai_summary(project, snapshot, metrics, diagram_images, links_payload=link_payload)
+            ai_sections = build_ai_summary(project, snapshot, ai_metrics, diagram_images, links_payload=limited_payload)
         except (AIUnavailable, AISummaryError) as exc:
             raise AnalysisReportError(str(exc)) from exc
 
@@ -862,6 +1206,7 @@ def generate_analysis_report(
     coverage_ibge = _load_coverage_ibge(snapshot) if allow_ibge else None
 
     header_color = overrides.get('header_color') or DEFAULT_HEADER_COLOR
+    company_logo_blob = _project_company_logo(project)
 
     storage_dir = ensure_project_path_exists(project, 'assets', 'reports')
     timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
@@ -878,6 +1223,7 @@ def generate_analysis_report(
         f"Relatório Técnico — {project.name}",
         f"Gerado em {datetime.utcnow():%d/%m/%Y %H:%M UTC}",
         header_color,
+        company_logo=company_logo_blob,
     )
 
     primary_rx = receiver_entries[0] if receiver_entries else None
@@ -901,13 +1247,15 @@ def generate_analysis_report(
         ('Localização', metrics.get("location") or '—'),
         ('Raio planejado', _format_number(metrics.get("radius_km"), 'km')),
         ('Clima', metrics.get("climate")),
+        ('HAAT médio (3-16 km)', _format_number(metrics.get('haat_average_m'), 'm')),
+        ('Radiais analisadas', str(len(haat_radials)) if haat_radials else '—'),
+        ('Contorno protegido', _format_number(metrics.get('contour_distance_km'), 'km')),
     ]
     right_column = [
-        ('Potência TX', _format_number(getattr(user, 'transmission_power', None), 'W')),
-        ('Ganho TX', _format_number(getattr(user, 'antenna_gain', None), 'dBi')),
-        ('Perdas Sistêmicas', _format_number(getattr(user, 'total_loss', None), 'dB')),
+        ('Potência TX', _format_number(metrics.get('tx_power_w'), 'W')),
+        ('Ganho TX (dBd)', _format_number(_gain_dbi_to_dbd(getattr(user, 'antenna_gain', None)), 'dBd')),
+        ('Perdas Sistêmicas', _format_number(metrics.get('losses_db'), 'dB')),
         ('Polarização', getattr(user, 'polarization', '—')),
-        ('Potência recebida', _format_number(center_metrics.get('received_power_center_dbm'), 'dBm')),
         ('Perda combinada', _format_number(center_metrics.get('combined_loss_center_db'), 'dB')),
         ('Ganho efetivo', _format_number(center_metrics.get('effective_gain_center_db'), 'dB')),
         ('L_b (centro)', _format_number((loss_components.get('L_b') or {}).get('center'), 'dB')),
@@ -917,10 +1265,37 @@ def generate_analysis_report(
     ]
     if primary_rx_label and primary_rx_loss is not None:
         right_column.append((f'Atenuação até {primary_rx_label}', _format_number(primary_rx_loss, 'dB')))
+    class_limits = classification.get('limits') or {}
+    if class_limits:
+        limit_text = f"{_format_number(class_limits.get('max_erp_kw'), 'kW')} / {_format_number(class_limits.get('max_haat_m'), 'm')}"
+        right_column.append(('Limite ERP/HAAT da classe', limit_text))
     y = _draw_columns(c, y, [
         (40, left_column),
         (320, right_column),
     ]) - 18
+
+    classification_text = None
+    if classification.get('label'):
+        erp_text = _format_number(classification.get('erp_kw'), 'kW')
+        haat_text = _format_number(classification.get('haat_m'), 'm')
+        contour_text = _format_number(classification.get('contour_km'), 'km')
+        pieces = [
+            f"Classe {classification['label']} ({classification.get('category') or 'FM/TV'})",
+            f"ERP analisada {erp_text}",
+            f"HAAT efetivo {haat_text}",
+        ]
+        if classification.get('contour_km') is not None:
+            pieces.append(f"Contorno protegido {contour_text}")
+        classification_text = ' · '.join(filter(None, pieces))
+    elif classification.get('reason'):
+        classification_text = classification['reason']
+    if classification_text:
+        c.setFont('Helvetica-Bold', 11)
+        c.drawString(40, y, "Classificação regulamentar")
+        y -= 16
+        c.setFont('Helvetica', 10)
+        y = _wrap_text(c, classification_text, 40, y, width_chars=95)
+        y -= 6
 
     notes_text = metrics.get("project_notes")
     if notes_text:
@@ -943,6 +1318,7 @@ def generate_analysis_report(
         f"Relatório Técnico — {project.name}",
         f"Gerado em {datetime.utcnow():%d/%m/%Y %H:%M UTC}",
         header_color,
+        company_logo=company_logo_blob,
     )
     c.setFont('Helvetica-Bold', 11)
     c.drawString(40, y, "Mancha de cobertura")
@@ -964,7 +1340,15 @@ def generate_analysis_report(
 
     c.showPage()
 
-    y = _start_page(c, width, height, "Sistema irradiante", project.slug, header_color)
+    y = _start_page(
+        c,
+        width,
+        height,
+        "Sistema irradiante",
+        project.slug,
+        header_color,
+        company_logo=company_logo_blob,
+    )
 
     antenna_block = [
         ('Modelo', settings.get('antennaModel') or settings.get('antenna_model') or '—'),
@@ -982,13 +1366,23 @@ def generate_analysis_report(
     y = _draw_text_block(c, 40, y - 4, antenna_metrics_block)
 
     diagram_sections = [
-        ("Diagrama Horizontal", getattr(user, "antenna_pattern_img_dia_H", None), ai_sections.get("pattern_horizontal")),
-        ("Diagrama Vertical", getattr(user, "antenna_pattern_img_dia_V", None), ai_sections.get("pattern_vertical")),
+        ("Diagrama Horizontal", diagram_images.get("diagrama_horizontal"), ai_sections.get("pattern_horizontal")),
+        ("Diagrama Vertical", diagram_images.get("diagrama_vertical"), ai_sections.get("pattern_vertical")),
     ]
     for title, blob, note in diagram_sections:
         if not blob:
             continue
-        y = _ensure_space(c, y, 260, width, height, "Sistema irradiante (cont.)", project.slug, header_color)
+        y = _ensure_space(
+            c,
+            y,
+            260,
+            width,
+            height,
+            "Sistema irradiante (cont.)",
+            project.slug,
+            header_color,
+            company_logo=company_logo_blob,
+        )
         c.setFont('Helvetica-Bold', 11)
         c.drawString(40, y, title)
         y = _embed_binary_image(c, blob, 40, y - 6, max_width=int(width - 120), max_height=240)
@@ -997,9 +1391,59 @@ def generate_analysis_report(
         y = _wrap_text(c, explanation, 40, y, width_chars=95, line_height=13)
         y -= 12
 
+    if haat_radials:
+        y = _ensure_space(
+            c,
+            y,
+            200,
+            width,
+            height,
+            "Sistema irradiante (cont.)",
+            project.slug,
+            header_color,
+            company_logo=company_logo_blob,
+        )
+        c.setFont('Helvetica-Bold', 11)
+        c.drawString(40, y, "Altura média por radial (3–16 km)")
+        y -= 18
+        haat_columns = [
+            ("Azimute", 80),
+            ("HAAT", 80),
+            ("Terreno médio", 110),
+        ]
+        haat_rows = [
+            [
+                f"{int(item.get('bearing_deg', 0))}°",
+                _format_number(item.get('haat_m'), 'm'),
+                _format_number(item.get('avg_terrain_m'), 'm'),
+            ]
+            for item in haat_radials
+        ]
+        y = _draw_table(
+            c,
+            y,
+            haat_columns,
+            haat_rows,
+            width,
+            height,
+            project.slug,
+            "Sistema irradiante (cont.)",
+            theme_color=header_color,
+            company_logo=company_logo_blob,
+        )
+        y -= 6
+
     c.showPage()
 
-    y = _start_page(c, width, height, "Enlaces e impacto populacional", project.slug, header_color)
+    y = _start_page(
+        c,
+        width,
+        height,
+        "Enlaces e impacto populacional",
+        project.slug,
+        header_color,
+        company_logo=company_logo_blob,
+    )
 
     c.setFont('Helvetica-Bold', 11)
     c.drawString(40, y, "Perfil do enlace principal")
@@ -1015,7 +1459,17 @@ def generate_analysis_report(
     y -= 18
 
     for idx, entry in enumerate(receiver_entries, 1):
-        y = _ensure_space(c, y, 130, width, height, "Receptores avaliados (cont.)", project.slug, header_color)
+        y = _ensure_space(
+            c,
+            y,
+            130,
+            width,
+            height,
+            "Receptores avaliados (cont.)",
+            project.slug,
+            header_color,
+            company_logo=company_logo_blob,
+        )
         label = entry.get('label') or f"Receptor {idx}"
         c.setFont('Helvetica-Bold', 10)
         c.drawString(40, y, label)
@@ -1060,7 +1514,17 @@ def generate_analysis_report(
         y -= 4
 
     if population_details:
-        y = _ensure_space(c, y, 120, width, height, "Enlaces e impacto populacional (cont.)", project.slug, header_color)
+        y = _ensure_space(
+            c,
+            y,
+            120,
+            width,
+            height,
+            "Enlaces e impacto populacional (cont.)",
+            project.slug,
+            header_color,
+            company_logo=company_logo_blob,
+        )
         c.setFont('Helvetica-Bold', 11)
         c.drawString(40, y, "Demografia detalhada por município")
         y -= 18
@@ -1083,7 +1547,15 @@ def generate_analysis_report(
             y = _wrap_text(c, text, 40, y, width_chars=95, line_height=12) - 4
             if y < 90:
                 c.showPage()
-                y = _start_page(c, width, height, "Enlaces e impacto populacional (cont.)", project.slug, header_color) - 20
+                y = _start_page(
+                    c,
+                    width,
+                    height,
+                    "Enlaces e impacto populacional (cont.)",
+                    project.slug,
+                    header_color,
+                    company_logo=company_logo_blob,
+                ) - 20
                 c.setFont('Helvetica-Bold', 11)
                 c.drawString(40, y, "Demografia detalhada por município (cont.)")
                 y -= 18
@@ -1091,7 +1563,17 @@ def generate_analysis_report(
 
     coverage_ibge_municipalities = (coverage_ibge or {}).get('municipalities') if coverage_ibge else []
     if coverage_ibge_municipalities:
-        y = _ensure_space(c, y, 160, width, height, "Enlaces e impacto populacional (cont.)", project.slug, header_color)
+        y = _ensure_space(
+            c,
+            y,
+            160,
+            width,
+            height,
+            "Enlaces e impacto populacional (cont.)",
+            project.slug,
+            header_color,
+            company_logo=company_logo_blob,
+        )
         c.setFont('Helvetica-Bold', 11)
         c.drawString(40, y, f"Municípios com campo ≥ {int((coverage_ibge or {}).get('threshold_dbuv', 25))} dBµV/m")
         y -= 18
@@ -1132,6 +1614,7 @@ def generate_analysis_report(
             project.slug,
             "Municípios com campo ≥ 25 dBµV/m (cont.)",
             theme_color=header_color,
+            company_logo=company_logo_blob,
         )
         y -= 6
 
@@ -1146,14 +1629,32 @@ def generate_analysis_report(
 
     if receivers_full:
         section_title = "Perfis por receptor"
-        y = _ensure_space(c, y, 220, width, height, section_title, project.slug, header_color)
+        y = _ensure_space(
+            c,
+            y,
+            220,
+            width,
+            height,
+            section_title,
+            project.slug,
+            header_color,
+            company_logo=company_logo_blob,
+        )
         c.setFont('Helvetica-Bold', 11)
         c.drawString(40, y, section_title)
         y -= 18
         for idx, rx in enumerate(receivers_full, 1):
             if y < 200:
                 c.showPage()
-                y = _start_page(c, width, height, f"{section_title} (cont.)", project.slug, header_color)
+                y = _start_page(
+                    c,
+                    width,
+                    height,
+                    f"{section_title} (cont.)",
+                    project.slug,
+                    header_color,
+                    company_logo=company_logo_blob,
+                )
                 c.setFont('Helvetica-Bold', 11)
                 c.drawString(40, y, f"{section_title} (cont.)")
                 y -= 18
@@ -1219,9 +1720,26 @@ def generate_analysis_report(
             profile_blob = _render_receiver_profile_plot(rx)
             if profile_blob:
                 y = _embed_binary_image(c, profile_blob, 50, y - 4, max_width=int(width - 120), max_height=160)
+            profile_info_lines = rx.get('profile_info') or _profile_info_from_meta(rx.get('profile_meta'))
+            if profile_info_lines:
+                c.setFont('Helvetica', 9)
+                for line in profile_info_lines:
+                    y -= 12
+                    c.drawString(50, y, line)
+                y -= 4
             y -= 8
 
-    y = _ensure_space(c, y, 120, width, height, "Conclusão e alcance estimado", project.slug, header_color)
+    y = _ensure_space(
+        c,
+        y,
+        120,
+        width,
+        height,
+        "Conclusão e alcance estimado",
+        project.slug,
+        header_color,
+        company_logo=company_logo_blob,
+    )
     c.setFont('Helvetica-Bold', 11)
     c.drawString(40, y, "Conclusão e alcance estimado")
     y -= 16
@@ -1238,7 +1756,17 @@ def generate_analysis_report(
     y = _wrap_text(c, conclusion, 40, y, width_chars=95)
     y -= 10
 
-    y = _ensure_space(c, y, 120, width, height, "Parecer técnico", project.slug, header_color)
+    y = _ensure_space(
+        c,
+        y,
+        120,
+        width,
+        height,
+        "Parecer técnico",
+        project.slug,
+        header_color,
+        company_logo=company_logo_blob,
+    )
     ai_conclusion = ai_sections.get("conclusion") or "Dados ainda não consolidados para o parecer automatizado."
     if ai_conclusion:
         c.setFont('Helvetica-Bold', 11)
@@ -1257,7 +1785,17 @@ def generate_analysis_report(
 
     recommendations = ai_sections.get("recommendations") or []
     if recommendations:
-        y = _ensure_space(c, y, 140, width, height, "Recomendações técnicas", project.slug, header_color)
+        y = _ensure_space(
+            c,
+            y,
+            140,
+            width,
+            height,
+            "Recomendações técnicas",
+            project.slug,
+            header_color,
+            company_logo=company_logo_blob,
+        )
         c.setFont('Helvetica-Bold', 11)
         c.drawString(40, y, "Recomendações técnicas")
         y -= 16
