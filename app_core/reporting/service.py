@@ -822,6 +822,9 @@ def _collect_receiver_entries(snapshot: Dict[str, Any], limit: int | None = MAX_
         demographics = ibge_info.get('demographics')
         if isinstance(demographics, dict) and demographics.get('total') is None:
             demographics = None
+        population_val = rx.get('population')
+        if population_val is None and isinstance(demographics, dict):
+            population_val = demographics.get('total') or demographics.get('population')
         profile_meta = rx.get('profile_meta') or {}
         profile_info = rx.get('profile_info') or rx.get('profile_info_lines')
         entries.append({
@@ -836,6 +839,7 @@ def _collect_receiver_entries(snapshot: Dict[str, Any], limit: int | None = MAX_
             "meets_field_min": field is not None and field >= MIN_FIELD_DBUV,
             "demographics": demographics,
             "ibge_code": ibge_info.get('code') or ibge_info.get('ibge_code'),
+            "population": population_val,
             "profile": rx.get('profile') or {},
             "profile_meta": profile_meta,
             "profile_info": profile_info,

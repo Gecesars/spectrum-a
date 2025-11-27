@@ -1404,6 +1404,7 @@ def home():
                 continue
             label = raw.get('label') or raw.get('name') or f'RX {idx + 1}'
             location = raw.get('location') if isinstance(raw.get('location'), dict) else {}
+            ibge = raw.get('ibge') if isinstance(raw.get('ibge'), dict) else {}
             lat = raw.get('lat')
             if lat is None:
                 lat = location.get('lat')
@@ -1420,15 +1421,22 @@ def home():
             )
             distance_value = _coerce_float(raw.get('distance_km') or raw.get('distance'))
             altitude_value = _coerce_float(raw.get('altitude_m') or location.get('altitude'))
+            population_val = raw.get('population')
+            if population_val is None and isinstance(ibge.get('demographics'), dict):
+                population_val = ibge['demographics'].get('total') or ibge['demographics'].get('population')
+            state_val = raw.get('state') or location.get('state') or ibge.get('state')
             normalized.append({
                 'label': label,
                 'municipality': raw.get('municipality') or location.get('municipality'),
+                'state': state_val,
+                'ibge_code': ibge.get('code') or ibge.get('ibge_code'),
                 'coordinates': {'lat': lat, 'lng': lng} if lat is not None and lng is not None else None,
                 'field': field_value,
                 'power': power_value,
                 'distance': distance_value,
                 'altitude': altitude_value,
                 'quality': raw.get('quality') or raw.get('status'),
+                'population': _coerce_float(population_val),
             })
         return normalized
 
@@ -1576,7 +1584,8 @@ def home():
         else None,
     }
 
-    receivers_summary = _normalize_receivers(coverage_snapshot.get('receivers') if isinstance(coverage_snapshot, dict) else [])[:4] if coverage_snapshot else []
+    receivers_summary = _normalize_receivers(coverage_snapshot.get('receivers') if isinstance(coverage_snapshot, dict) else []) if coverage_snapshot else []
+    receivers_population = coverage_snapshot.get('receivers_population') if isinstance(coverage_snapshot, dict) else None
 
     dataset_sources_preview = []
     reports_preview = []
@@ -1682,6 +1691,7 @@ def home():
         new_project_url=url_for('projects.new_project'),
         projects_list_url=url_for('projects.list_projects'),
         coverage_snapshot=coverage_snapshot,
+        receivers_population=receivers_population,
     )
 
 # -------- Antena: carregar/mostrar diagramas --------
