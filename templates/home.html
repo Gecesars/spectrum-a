@@ -340,6 +340,7 @@
                                     <tr>
                                         <th>Receptor</th>
                                         <th>Município</th>
+                                        <th>População</th>
                                         <th>Campo</th>
                                         <th>Potência</th>
                                         <th>Distância</th>
@@ -349,7 +350,16 @@
                                     {% for rx in receivers_summary %}
                                         <tr>
                                             <td>{{ rx.label }}</td>
-                                            <td>{{ rx.municipality or '—' }}</td>
+                                            <td>
+                                                {{ rx.municipality or '—' }}{% if rx.state %} / {{ rx.state }}{% endif %}
+                                            </td>
+                                            <td>
+                                                {% if rx.population is not none %}
+                                                    {{ "{:,.0f}".format(rx.population|int).replace(",", ".") }}
+                                                {% else %}
+                                                    —
+                                                {% endif %}
+                                            </td>
                                             <td>{{ rx.field|round(1) if rx.field is not none else '—' }} dBµV/m</td>
                                             <td>{{ rx.power|round(1) if rx.power is not none else '—' }} dBm</td>
                                             <td>{{ rx.distance|round(2) if rx.distance is not none else '—' }} km</td>
@@ -358,6 +368,33 @@
                                 </tbody>
                             </table>
                         </div>
+                        {% if receivers_population %}
+                            <div class="alert alert-info mt-3 mb-0 py-2">
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <div>
+                                        <strong>População ≥ {{ receivers_population.threshold_dbuvm|round(0) }} dBµV/m:</strong>
+                                        {{ "{:,.0f}".format(receivers_population.total|int).replace(",", ".") }}
+                                    </div>
+                                    <small class="text-muted">Fonte: Censo 2022 offline</small>
+                                </div>
+                                {% if receivers_population.entries %}
+                                    <div class="mt-1 small">
+                                        {% for entry in receivers_population.entries[:5] %}
+                                            <div>
+                                                {{ entry.municipality }}{% if entry.state %} / {{ entry.state }}{% endif %}
+                                                —
+                                                {% if entry.population is not none %}
+                                                    {{ "{:,.0f}".format(entry.population|int).replace(",", ".") }}
+                                                {% else %}
+                                                    —
+                                                {% endif %}
+                                                {% if entry.field_dbuvm is not none %} ({{ entry.field_dbuvm|round(1) }} dBµV/m){% endif %}
+                                            </div>
+                                        {% endfor %}
+                                    </div>
+                                {% endif %}
+                            </div>
+                        {% endif %}
                     {% else %}
                         <p class="text-muted small mb-0">Nenhum receptor sincronizado para este projeto ainda.</p>
                     {% endif %}
