@@ -8,6 +8,10 @@ from datetime import datetime, timedelta
 from math import radians, cos, sin, asin, sqrt, degrees
 from pathlib import Path
 from typing import Iterable
+from functools import lru_cache
+import unicodedata
+import re
+import unicodedata
 import astropy
 import geojson
 import matplotlib
@@ -78,6 +82,8 @@ from app_core.regulatory.service import build_default_payload
 from app_core.integrations import ibge as ibge_api
 
 GAIN_OFFSET_DBI_DBD = 2.15
+DOCS_DIR = Path(__file__).resolve().parents[2] / "docs"
+LOCAL_POP_XLSX = DOCS_DIR / "CD2022_Populacao_Coletada_Imputada_e_Total_Municipio_e_UF_20231222.xlsx"
 
 
 def _gain_dbi_to_dbd(value):
@@ -92,6 +98,106 @@ def _gain_dbd_to_dbi(value):
         return float(value) + GAIN_OFFSET_DBI_DBD
     except (TypeError, ValueError):
         return None
+
+
+@lru_cache(maxsize=1)
+def _load_local_population():
+    """
+    Carrega população total por município do XLSX local (Censo 2022).
+    Retorna dict[ibge_code] -> {"municipality", "state", "population", "year"}.
+    """
+    if not LOCAL_POP_XLSX.exists():
+        return {}
+    try:
+        import zipfile
+        import xml.etree.ElementTree as ET
+
+        zf = zipfile.ZipFile(LOCAL_POP_XLSX)
+        ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+        shared_strings = [
+            t.text or "" for t in ET.fromstring(zf.read("xl/sharedStrings.xml")).iter(f"{ns}t")
+        ]
+        sheet = ET.fromstring(zf.read("xl/worksheets/sheet1.xml"))
+        rows = sheet.findall(f".//{ns}sheetData/{ns}row")
+        data = {}
+        if not rows or len(rows) <= 1:
+            return data
+        for row in rows[1:]:
+            vals = []
+            for cell in row.findall(f"{ns}c"):
+                v = cell.find(f"{ns}v")
+                if v is None:
+                    vals.append("")
+                    continue
+                val = v.text or ""
+                if cell.get("t") == "s":
+                    try:
+                        val = shared_strings[int(val)]
+                    except (Exception,):
+                        val = ""
+                vals.append(val)
+            if len(vals) < 7:
+                continue
+            state_abbr = (vals[0] or "").strip()
+            state_code = (vals[1] or "").strip().zfill(2)
+            mun_code = (vals[2] or "").strip().zfill(5)
+            full_code = f"{state_code}{mun_code}"
+            name = (vals[3] or "").strip()
+            try:
+                pop_total = int(float(vals[6]))
+            except (TypeError, ValueError):
+                continue
+            data[full_code] = {
+                "municipality": name,
+                "state": state_abbr,
+                "population": pop_total,
+                "year": 2022,
+                "code": full_code,
+            }
+        return data
+    except Exception:
+        return {}
+
+
+def _normalize_loc_key(name: str | None, state: str | None) -> str:
+    def _strip_city(raw: str | None) -> str:
+        if not raw:
+            return ""
+        txt = str(raw)
+        # pega antes de vírgula ou hífen (ex.: "Sinop, Mato Grosso, Brasil" -> "Sinop")
+        txt = re.split(r"[,-/]", txt)[0]
+        return txt
+
+    def _clean(val: str | None) -> str:
+        if not val:
+            return ""
+        txt = unicodedata.normalize("NFKD", str(val)).encode("ascii", "ignore").decode("ascii")
+        return txt.strip().lower()
+
+    return f"{_clean(_strip_city(name))}|{_clean(state)}"
+
+
+def _lookup_population_by_name(name: str | None, state: str | None):
+    if not name:
+        return None
+    local_pop = _load_local_population()
+    if not local_pop:
+        return None
+    state_code = ibge_api.normalize_state_code(state) if state else None
+    # 1) match name + state code/abbr
+    if state_code:
+        key = _normalize_loc_key(name, state_code)
+        for code, payload in local_pop.items():
+            cand_key = _normalize_loc_key(payload.get("municipality"), payload.get("state"))
+            if cand_key == key:
+                return payload
+    # 2) match só por nome (pode ter homônimos, mas melhor que vazio)
+    key_name = _normalize_loc_key(name, "")
+    for code, payload in local_pop.items():
+        cand_key = _normalize_loc_key(payload.get("municipality"), "")
+        if cand_key == key_name:
+            return payload
+    return None
 
 
 matplotlib.use('Agg')
@@ -464,6 +570,53 @@ def _normalize_direction_value(value, default=None):
     if ang < 0:
         ang += 360.0
     return float(ang)
+
+
+def _json_safe(data):
+    """
+    Remove NaN/inf e normaliza tipos para algo serializável em JSON.
+    """
+    def _convert(val):
+        if val is None:
+            return None
+        if isinstance(val, (np.floating, float)):
+            return None if math.isnan(val) or math.isinf(val) else float(val)
+        if isinstance(val, (np.integer, int)):
+            return int(val)
+        if isinstance(val, (np.bool_, bool)):
+            return bool(val)
+        return val
+
+    if isinstance(data, dict):
+        return {str(k): _json_safe(v) for k, v in data.items()}
+    if isinstance(data, (list, tuple, set)):
+        return [_json_safe(v) for v in data]
+
+    cleaned = _convert(data)
+    if cleaned is data:
+        try:
+            json.dumps(cleaned, allow_nan=False)
+            return cleaned
+        except TypeError:
+            return str(cleaned)
+    return cleaned
+
+
+def _json_default(obj):
+    """
+    Conversor auxiliar para tipos não serializáveis nativamente.
+    """
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, Path):
+        return str(obj)
+    if isinstance(obj, (np.floating, float)):
+        return None if math.isnan(obj) or math.isinf(obj) else float(obj)
+    if isinstance(obj, (np.integer, int)):
+        return int(obj)
+    if isinstance(obj, (np.bool_, bool)):
+        return bool(obj)
+    return str(obj)
 
 
 def _prepare_tx_object(base_tx, overrides=None, pattern_bytes=None):
@@ -3026,7 +3179,7 @@ def _compute_haat_radials(
     return radials, haat_average
 
 
-def _lookup_municipality_details(lat, lon, include_ibge=False):
+def _lookup_municipality_details(lat, lon, include_ibge=False, include_population=False):
     params = {
         'lat': lat,
         'lon': lon,
@@ -3053,6 +3206,13 @@ def _lookup_municipality_details(lat, lon, include_ibge=False):
         if include_ibge:
             state_hint = detail.get('state_code') or detail.get('state')
             detail['ibge_code'] = ibge_api.resolve_municipality_code(detail['name'], state_hint)
+        if include_population:
+            pop = _lookup_population_by_name(detail.get('name'), detail.get('state_code') or detail.get('state'))
+            if pop:
+                detail['population'] = pop.get('population')
+                detail['population_year'] = pop.get('year')
+                if not detail.get('ibge_code') and pop.get('code'):
+                    detail['ibge_code'] = pop.get('code')
         return detail
     except Exception as exc:
         current_app.logger.warning('Geocoding provider osm-nominatim falhou: %s', exc)
@@ -3131,7 +3291,7 @@ def _enrich_receivers_metadata(receivers, tx_object):
             cache_key = (round(lat, 5), round(lon, 5))
             details = location_cache.get(cache_key)
             if details is None:
-                details = _lookup_municipality_details(lat, lon, include_ibge=True)
+                details = _lookup_municipality_details(lat, lon, include_ibge=True, include_population=True)
                 location_cache[cache_key] = details
 
         if details:
@@ -3146,13 +3306,37 @@ def _enrich_receivers_metadata(receivers, tx_object):
                 rx_copy.setdefault('municipality', municipality_name)
             if state_label:
                 rx_copy['state'] = state_label
-            ibge_code = details.get('ibge_code')
             demographics = None
-            if ibge_code:
+            ibge_code = details.get('ibge_code')
+            # 1) Fonte primária: XLSX local por nome/UF
+            local_pop = _lookup_population_by_name(municipality_name, state_label)
+            if local_pop:
+                ibge_code = local_pop.get('code') or ibge_code
+                demographics = {'total': local_pop.get('population'), 'year': local_pop.get('year')}
+                rx_copy['population'] = local_pop.get('population')
+                rx_copy['population_year'] = local_pop.get('year')
+                if not rx_copy.get('state'):
+                    rx_copy['state'] = local_pop.get('state')
+                demographics_cache[ibge_code or municipality_name] = demographics
+            elif details.get('population'):
+                demographics = {'total': details.get('population'), 'year': details.get('population_year')}
+                rx_copy['population'] = details.get('population')
+                rx_copy['population_year'] = details.get('population_year')
+            # 2) Fallback: tentar API IBGE se XLSX não trouxe
+            if demographics is None and ibge_code:
                 demographics = demographics_cache.get(ibge_code)
                 if demographics is None:
                     demographics = ibge_api.fetch_demographics_by_code(ibge_code)
                     demographics_cache[ibge_code] = demographics
+                if demographics is None:
+                    local_pop = _load_local_population().get(str(ibge_code))
+                    if local_pop:
+                        demographics = {'total': local_pop.get('population'), 'year': local_pop.get('year')}
+                        demographics_cache[ibge_code] = demographics
+                        rx_copy['population'] = local_pop.get('population')
+                        rx_copy['population_year'] = local_pop.get('year')
+                        if not rx_copy.get('state'):
+                            rx_copy['state'] = local_pop.get('state')
             ibge_payload = {
                 'code': ibge_code,
                 'name': municipality_name,
@@ -3168,6 +3352,86 @@ def _enrich_receivers_metadata(receivers, tx_object):
 
         enriched.append(rx_copy)
     return enriched
+
+
+def _collect_receivers_population(receivers: list, threshold_dbuvm: float = 35.0) -> dict:
+    """
+    Soma população apenas dos receptores com campo >= limiar.
+    Usa demographics em rx['ibge'] ou fallback local.
+    """
+    local_pop = _load_local_population()
+    total = 0
+    entries = []
+    seen = {}
+    if not isinstance(receivers, list):
+        return {"threshold_dbuvm": threshold_dbuvm, "total": 0, "entries": []}
+
+    for rx in receivers:
+        if not isinstance(rx, dict):
+            continue
+        field_val = rx.get('field') or rx.get('field_dbuv_m') or rx.get('field_value')
+        try:
+            field_val = float(field_val)
+        except (TypeError, ValueError):
+            field_val = None
+
+        ibge_payload = rx.get('ibge') or {}
+        demographics = ibge_payload.get('demographics')
+        if demographics is None and ibge_payload.get('code'):
+            demographics = local_pop.get(str(ibge_payload.get('code')))
+        if demographics is None:
+            demographics = _lookup_population_by_name(
+                rx.get('municipality') or ibge_payload.get('name'),
+                rx.get('state') or ibge_payload.get('state'),
+            )
+        population = None
+        if isinstance(demographics, dict):
+            population = demographics.get('total') or demographics.get('population')
+        elif isinstance(demographics, (int, float)):
+            population = demographics
+        if population is None and ibge_payload.get('code'):
+            fallback = local_pop.get(str(ibge_payload.get('code')))
+            if fallback:
+                population = fallback.get('population')
+                if not rx.get('state'):
+                    rx['state'] = fallback.get('state')
+
+        try:
+            pop_int = int(float(population)) if population is not None else None
+        except (TypeError, ValueError):
+            pop_int = None
+
+        if pop_int is not None:
+            rx['population'] = pop_int
+            rx['population_year'] = demographics.get('year') if isinstance(demographics, dict) else None
+
+        if field_val is None or field_val < threshold_dbuvm or pop_int is None:
+            continue
+
+        key = ibge_payload.get('code') or ibge_payload.get('ibge_code')
+        if key is not None:
+            key = str(key)
+        else:
+            key = _normalize_loc_key(rx.get('municipality') or ibge_payload.get('name'),
+                                     rx.get('state') or ibge_payload.get('state'))
+        if key in seen:
+            if field_val > seen[key]['field_dbuvm']:
+                seen[key]['field_dbuvm'] = field_val
+            continue
+
+        entry = {
+            "label": rx.get('label'),
+            "municipality": rx.get('municipality') or ibge_payload.get('name'),
+            "state": rx.get('state') or ibge_payload.get('state'),
+            "ibge_code": ibge_payload.get('code') or ibge_payload.get('ibge_code'),
+            "field_dbuvm": field_val,
+            "population": pop_int,
+        }
+        seen[key] = entry
+        entries.append(entry)
+        total += pop_int
+
+    return {"threshold_dbuvm": threshold_dbuvm, "total": total, "entries": entries}
 
 
 
@@ -3986,22 +4250,8 @@ def _persist_coverage_artifacts(user, project, engine_value, request_payload, co
     timestamp_iso = timestamp.isoformat()
     base_name = f"coverage_{timestamp.strftime('%Y%m%d_%H%M%S')}_{engine_enum.value}"
 
-    def _json_default(obj):
-        if isinstance(obj, (np.floating, float)):
-            return float(obj)
-        if isinstance(obj, (np.integer, int)):
-            return int(obj)
-        if isinstance(obj, (np.bool_, bool)):
-            return bool(obj)
-        return str(obj)
-
     def _clean_json(data):
-        if data is None:
-            return None
-        try:
-            return json.loads(json.dumps(data, default=_json_default))
-        except TypeError:
-            return data
+        return _json_safe(data)
 
     storage_paths = ensure_storage_structure(str(user.uuid), project.slug)
     coverage_dir = storage_paths.get('assets/coverage')
@@ -4069,6 +4319,7 @@ def _persist_coverage_artifacts(user, project, engine_value, request_payload, co
         "tx_site_elevation": coverage_payload.get('tx_site_elevation'),
         "tx_parameters": _clean_json(coverage_payload.get('tx_parameters')),
         "receivers": _clean_json(receivers_payload),
+        "receivers_population": _clean_json(coverage_payload.get('receivers_population')),
         "rt3d_scene": _clean_json(coverage_payload.get('rt3dScene')),
         "rt3d_diagnostics": _clean_json(coverage_payload.get('rt3dDiagnostics')),
         "rt3d_rays": _clean_json(coverage_payload.get('rt3dRays')),
@@ -4191,7 +4442,7 @@ def _persist_coverage_artifacts(user, project, engine_value, request_payload, co
     if tile_metadata:
         summary_payload["tiles"] = _clean_json(tile_metadata)
 
-    json_path.write_text(json.dumps(summary_payload, ensure_ascii=False, indent=2, default=_json_default))
+    json_path.write_text(json.dumps(_json_safe(summary_payload), ensure_ascii=False, indent=2, default=_json_default))
 
     job = CoverageJob(
         project_id=project.id,
@@ -5341,6 +5592,8 @@ def calculate_coverage():
     result = _compute_coverage_map(tx_object, data, dem_directory=dem_directory, rt3d_scene=rt3d_scene_summary)
     if receivers:
         result['receivers'] = receivers
+    receivers_pop = _collect_receivers_population(receivers)
+    result['receivers_population'] = receivers_pop
     status_payload = result.get('datasetStatus') or {}
     if dataset_summary:
         dem_asset = dataset_summary.get('dem_asset')
@@ -5420,7 +5673,7 @@ def calculate_coverage():
         if tiles_meta:
             result['tiles'] = tiles_meta
 
-    return jsonify(result)
+    return jsonify(_json_safe(result))
 
 
 
@@ -5775,8 +6028,17 @@ def reverse_geocode():
         lon = request.args.get('lon', type=float)
         if lat is None or lon is None:
             return jsonify({'error': 'Parâmetros inválidos.'}), 400
-        municipality = _lookup_municipality(lat, lon)
-        return jsonify({'municipality': municipality or '-'}), 200
+        details = _lookup_municipality_details(lat, lon, include_ibge=True, include_population=True) or {}
+        payload = {
+            'municipality': details.get('name') or '-',
+            'state': details.get('state'),
+            'state_code': details.get('state_code'),
+            'country': details.get('country'),
+            'ibge_code': details.get('ibge_code'),
+            'population': details.get('population'),
+            'population_year': details.get('population_year'),
+        }
+        return jsonify(payload), 200
     except Exception as exc:
         current_app.logger.warning('reverse_geocode.failed: %s', exc)
         return jsonify({'error': 'Não foi possível determinar o município.'}), 500

@@ -7,8 +7,8 @@ Create Date: 2025-02-14 23:05:00.000000
 """
 from __future__ import annotations
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 
 # revision identifiers, used by Alembic.
@@ -19,10 +19,18 @@ depends_on = None
 
 
 def upgrade() -> None:
-    with op.batch_alter_table("projects") as batch_op:
-        batch_op.add_column(sa.Column("settings", sa.JSON(), nullable=True))
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    columns = {col["name"] for col in inspector.get_columns("projects")}
+    if "settings" not in columns:
+        with op.batch_alter_table("projects") as batch_op:
+            batch_op.add_column(sa.Column("settings", sa.JSON(), nullable=True))
 
 
 def downgrade() -> None:
-    with op.batch_alter_table("projects") as batch_op:
-        batch_op.drop_column("settings")
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    columns = {col["name"] for col in inspector.get_columns("projects")}
+    if "settings" in columns:
+        with op.batch_alter_table("projects") as batch_op:
+            batch_op.drop_column("settings")

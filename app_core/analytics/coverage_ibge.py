@@ -23,6 +23,8 @@ LOGGER = logging.getLogger(__name__)
 
 _GEOCODE_PRECISION = 3  # grau ~ 110m
 OSM_REVERSE_URL = "https://nominatim.openstreetmap.org/reverse"
+BASE_DIR = Path(__file__).resolve().parents[1]
+LOCAL_POPULATION_XLSX = BASE_DIR / "docs" / "CD2022_Populacao_Coletada_Imputada_e_Total_Municipio_e_UF_20231222.xlsx"
 
 
 def _round_coord(value: float, precision: int = _GEOCODE_PRECISION) -> float:
@@ -132,6 +134,73 @@ def _resolve_municipality(lat: float, lon: float) -> Optional[Dict[str, str]]:
     return meta
 
 
+@lru_cache(maxsize=1)
+def _load_local_population() -> Dict[str, Dict[str, object]]:
+    """
+    Carrega população total por município a partir do XLSX local (IBGE Censo 2022).
+    Evita chamadas de rede quando o arquivo estiver disponível.
+    """
+    if not LOCAL_POPULATION_XLSX.exists():
+        return {}
+
+    try:
+        import xml.etree.ElementTree as ET
+        import zipfile
+
+        zf = zipfile.ZipFile(LOCAL_POPULATION_XLSX)
+        ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+        shared_strings = [
+            t.text or "" for t in ET.fromstring(zf.read("xl/sharedStrings.xml")).iter(f"{ns}t")
+        ]
+        sheet = ET.fromstring(zf.read("xl/worksheets/sheet1.xml"))
+        rows = sheet.findall(f".//{ns}sheetData/{ns}row")
+        if not rows or len(rows) <= 1:
+            return {}
+
+        data: Dict[str, Dict[str, object]] = {}
+        # Skip header (row 0), start from row 1
+        for row in rows[1:]:
+            values: List[str] = []
+            for cell in row.findall(f"{ns}c"):
+                v = cell.find(f"{ns}v")
+                if v is None:
+                    values.append("")
+                    continue
+                val = v.text or ""
+                if cell.get("t") == "s":
+                    try:
+                        val = shared_strings[int(val)]
+                    except (ValueError, IndexError):
+                        val = ""
+                values.append(val)
+
+            if len(values) < 7:
+                continue
+
+            state_abbr = (values[0] or "").strip()
+            state_code = (values[1] or "").strip().zfill(2)
+            mun_code = (values[2] or "").strip().zfill(5)
+            full_code = f"{state_code}{mun_code}"
+            name = (values[3] or "").strip()
+
+            try:
+                population_total = int(float(values[6]))
+            except (TypeError, ValueError):
+                continue
+
+            data[full_code] = {
+                "municipality": name,
+                "state": state_abbr,
+                "population": population_total,
+                "year": 2022,
+            }
+
+        return data
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        LOGGER.warning("ibge.local_population_failed", extra={"error": str(exc)})
+        return {}
+
+
 def _enrich_municipalities_with_ibge(
     municipalities: Dict[str, MunicipalityCoverage],
     population_threshold: float = 25.0,
@@ -139,23 +208,44 @@ def _enrich_municipalities_with_ibge(
     if not municipalities:
         return
 
-    session = _create_sidra_session()
-    population_data = fetch_population_estimates(municipalities.keys(), session=session)
+    local_population = _load_local_population()
 
-    state_codes = {info.state_id for info in municipalities.values() if info.state_id}
-    income_data = fetch_income_per_capita_by_state(state_codes, session=session)
+    # 1) Tenta usar o XLSX local (sem rede)
+    if local_population:
+        for code, info in municipalities.items():
+            payload = local_population.get(code)
+            if payload:
+                info.population = payload.get("population")
+                info.population_year = payload.get("year")
+                if not info.state and payload.get("state"):
+                    info.state = str(payload.get("state"))
 
-    for code, info in municipalities.items():
-        pop_entry = population_data.get(code)
-        if pop_entry:
+    # 2) Fallback opcional para API se ainda houver lacunas
+    missing_codes = [code for code, info in municipalities.items() if info.population is None]
+    if missing_codes:
+        session = _create_sidra_session()
+        population_data = fetch_population_estimates(missing_codes, session=session)
+        for code in missing_codes:
+            pop_entry = population_data.get(code)
+            if not pop_entry:
+                continue
+            info = municipalities.get(code)
+            if not info:
+                continue
             info.population = pop_entry.get("value")
             info.population_year = pop_entry.get("year")
 
-        if info.state_id:
-            income_entry = income_data.get(info.state_id)
-            if income_entry:
-                info.income_per_capita = income_entry.get("value")
-                info.income_year = income_entry.get("year")
+    # 3) Mantém enriquecimento de renda por UF se possível (não crítico para população)
+    state_codes = {info.state_id for info in municipalities.values() if info.state_id}
+    if state_codes:
+        session = _create_sidra_session()
+        income_data = fetch_income_per_capita_by_state(state_codes, session=session)
+        for code, info in municipalities.items():
+            if info.state_id:
+                income_entry = income_data.get(info.state_id)
+                if income_entry:
+                    info.income_per_capita = income_entry.get("value")
+                    info.income_year = income_entry.get("year")
 
 
 def summarize_coverage_demographics(

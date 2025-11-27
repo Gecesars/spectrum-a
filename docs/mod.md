@@ -96,6 +96,7 @@
 ## Contexto
 - Objetivo: incorporar ao pipeline de geração de relatórios (`/relatorios/digital`) informações sociodemográficas (população total e renda per capita) dos municípios cujo campo elétrico estimado excede **25 dBµV/m**.
 - Fonte auxiliar: documento `docs/ibge.pdf` (“API IBGE_ População Ativa e Renda”) contendo tabelas de referência para população ativa, renda e outras métricas.
+- População agora é carregada localmente do XLSX `docs/CD2022_Populacao_Coletada_Imputada_e_Total_Municipio_e_UF_20231222.xlsx` (Censo 2022) para os municípios cobertos acima do limiar; se a API IBGE falhar, seguimos respondendo com essa fonte offline.
 - Cobertura: os tiles rasterizados (`/projects/<slug>/assets/<asset_id>/tiles/{z}/{x}/{y}.png`) representam a mancha de cobertura – precisamos analisá-los para encontrar áreas acima do limiar definido.
 
 ## Requisitos Funcionais
@@ -137,5 +138,4 @@
 4. Atualizar documentação e notas do relatório para refletir a nova sessão e fontes de dados.
 
 > **Nota:** o parser do PDF deve ser robusto a formatações (colunas múltiplas, cabeçalhos) — avaliar se exportar previamente para CSV facilita a manutenção.
-
 

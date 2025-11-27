@@ -86,9 +86,23 @@ def upgrade() -> None:
             .values(uuid=str(uuid.uuid4()))
         )
 
-    op.alter_column("users", "uuid", nullable=False)
-    op.create_unique_constraint("uq_users_uuid", "users", ["uuid"])
-    op.create_index("ix_users_uuid", "users", ["uuid"], unique=False)
+    if is_postgres:
+        op.alter_column("users", "uuid", nullable=False)
+    else:
+        # SQLite lacks ALTER COLUMN; batch rewrite achieves the same effect
+        with op.batch_alter_table("users") as batch_op:
+            batch_op.alter_column(
+                "uuid",
+                existing_type=sa.String(length=36),
+                nullable=False,
+            )
+
+    if is_postgres:
+        op.create_unique_constraint("uq_users_uuid", "users", ["uuid"])
+        op.create_index("ix_users_uuid", "users", ["uuid"], unique=False)
+    else:
+        # SQLite cannot add a table-level constraint after creation; unique index works
+        op.create_index("ix_users_uuid", "users", ["uuid"], unique=True)
 
     if is_postgres:
         asset_type_enum = postgresql.ENUM(
@@ -479,8 +493,10 @@ def downgrade() -> None:
         coverage_engine_enum.drop(bind, checkfirst=True)
         asset_type_enum.drop(bind, checkfirst=True)
 
-    op.drop_constraint("uq_users_uuid", "users", type_="unique")
-    op.drop_index("ix_users_uuid", table_name="users")
+        op.drop_constraint("uq_users_uuid", "users", type_="unique")
+        op.drop_index("ix_users_uuid", table_name="users")
+    else:
+        op.drop_index("ix_users_uuid", table_name="users")
     op.drop_column("users", "updated_at")
     op.drop_column("users", "created_at")
     op.drop_column("users", "is_email_confirmed")

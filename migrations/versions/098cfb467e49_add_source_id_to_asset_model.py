@@ -34,7 +34,13 @@ def upgrade():
                type_=sa.JSON(),
                existing_nullable=True)
         batch_op.create_index(batch_op.f('ix_assets_source_id'), ['source_id'], unique=False)
-        batch_op.create_foreign_key(None, 'dataset_sources', ['source_id'], ['id'], ondelete='SET NULL')
+        batch_op.create_foreign_key(
+            "fk_assets_source_id_dataset_sources",
+            "dataset_sources",
+            ["source_id"],
+            ["id"],
+            ondelete="SET NULL",
+        )
 
     with op.batch_alter_table('coverage_jobs', schema=None) as batch_op:
         batch_op.alter_column('id',
@@ -200,7 +206,10 @@ def downgrade():
                existing_nullable=False)
 
     with op.batch_alter_table('assets', schema=None) as batch_op:
-        batch_op.drop_constraint(None, type_='foreignkey')
+        batch_op.drop_constraint(
+            "fk_assets_source_id_dataset_sources",
+            type_="foreignkey",
+        )
         batch_op.drop_index(batch_op.f('ix_assets_source_id'))
         batch_op.alter_column('meta',
                existing_type=sa.JSON(),

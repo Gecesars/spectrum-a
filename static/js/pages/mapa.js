@@ -792,7 +792,7 @@ function refreshReceiverSummaries() {
     }
     state.rxEntries.forEach((entry, idx) => {
         const position = entry.marker.getPosition();
-        computeReceiverSummary(position).then((summary) => {
+        computeReceiverSummary(position, entry.summary).then((summary) => {
             entry.summary = summary;
             if (idx === state.selectedRxIndex) {
                 updateLinkSummary(summary);
@@ -888,6 +888,13 @@ function buildSummaryFromReceiver(receiver) {
     if (receiver.ibge) {
         summary.ibge = receiver.ibge;
     }
+    const pop =
+        receiver.population
+        ?? receiver.ibge?.demographics?.total
+        ?? receiver.ibge?.demographics?.population;
+    if (Number.isFinite(Number(pop))) {
+        summary.population = Number(pop);
+    }
     return summary;
 }
 
@@ -934,6 +941,35 @@ function showToast(message, isError = false) {
     }, 3600);
 }
 
+function renderPopulationOverlay(popSummary) {
+    const box = document.getElementById('populationBox');
+    if (!box) return;
+    if (!popSummary || !popSummary.total) {
+        box.hidden = true;
+        return;
+    }
+    const threshold = popSummary.threshold_dbuvm ?? 35;
+    const entries = Array.isArray(popSummary.entries) ? popSummary.entries : [];
+    const lines = entries.slice(0, 5).map((entry) => {
+        const city = entry.municipality || '—';
+        const uf = entry.state ? ` / ${entry.state}` : '';
+        const pop = Number.isFinite(Number(entry.population))
+            ? Number(entry.population).toLocaleString('pt-BR')
+            : '—';
+        const field = Number.isFinite(Number(entry.field_dbuvm))
+            ? `${Number(entry.field_dbuvm).toFixed(1)} dBµV/m`
+            : '';
+        return `<div class="pop-entry">${city}${uf} — ${pop}${field ? ` (${field})` : ''}</div>`;
+    }).join('');
+    const total = Number(popSummary.total).toLocaleString('pt-BR');
+    box.innerHTML = `
+        <h4>População ≥ ${threshold} dBµV/m</h4>
+        <p>Total: ${total}</p>
+        ${lines}
+    `;
+    box.hidden = false;
+}
+
 function setProfileLoading(isLoading) {
     profileLoading = Boolean(isLoading);
     const spinner = document.getElementById('profileSpinner');
@@ -973,7 +1009,7 @@ function fetchMunicipality(latLng) {
             if (!response.ok) {
                 throw new Error(json.error || 'Falha ao buscar município.');
             }
-            return json.municipality || null;
+            return json;
         }))
         .catch(() => null);
 }
@@ -1301,6 +1337,7 @@ async function loadCoverageOverlay(lastCoverage) {
         rt3dRays: summary?.rt3d_rays || lastCoverage.rt3d_rays || null,
         rt3dSettings: summary?.rt3d_settings || lastCoverage.rt3d_settings || null,
         tiles: summary?.tiles || lastCoverage.tiles || null,
+        receivers_population: summary?.receivers_population || lastCoverage.receivers_population || null,
     };
 
     const centerLat = parseNullableNumber(
@@ -1345,6 +1382,9 @@ async function loadCoverageOverlay(lastCoverage) {
     state.coverageData.rt3dDiagnostics = coveragePayload.rt3dDiagnostics || summary?.rt3d_diagnostics || lastCoverage.rt3d_diagnostics || state.coverageData.rt3dDiagnostics || null;
     state.coverageData.rt3dRays = coveragePayload.rt3dRays || summary?.rt3d_rays || lastCoverage.rt3d_rays || state.coverageData.rt3dRays || null;
     state.coverageData.rt3dSettings = coveragePayload.rt3dSettings || summary?.rt3d_settings || lastCoverage.rt3d_settings || state.coverageData.rt3dSettings || null;
+    state.coverageData.receivers_population = coveragePayload.receivers_population || state.coverageData.receivers_population || null;
+
+    renderPopulationOverlay(state.coverageData.receivers_population);
     if (state.coverageData.engine !== 'rt3d') {
         state.coverageData.rt3dScene = null;
         state.coverageData.rt3dDiagnostics = null;
@@ -1445,6 +1485,12 @@ function updateLinkSummary(summary) {
     document.getElementById('linkBearing').textContent = summary.bearing || '-';
     document.getElementById('linkField').textContent = summary.field || '-';
     document.getElementById('linkElevation').textContent = summary.elevation || '-';
+    const pop = summary?.ibge?.demographics?.total
+        || summary?.ibge?.demographics?.population
+        || summary?.population;
+    const popText = Number.isFinite(Number(pop)) ? Number(pop).toLocaleString('pt-BR') : '—';
+    const target = document.getElementById('profileRxPopulation');
+    if (target) target.textContent = popText;
 }
 
 function highlightRxEntry(index) {
@@ -1671,13 +1717,17 @@ function ensureElevationServiceAndGet(position) {
     });
 }
 
-function computeReceiverSummary(position) {
+function computeReceiverSummary(position, baseSummary = {}) {
+    if (!state.txCoords) {
+        return Promise.resolve({ ...(baseSummary || {}) });
+    }
     const distanceMeters = google.maps.geometry.spherical.computeDistanceBetween(state.txCoords, position);
     const bearingRaw = google.maps.geometry.spherical.computeHeading(state.txCoords, position);
     const distanceKm = distanceMeters / 1000;
     const normalizedBearing = normalizeAzimuth(bearingRaw);
 
     const summary = {
+        ...(baseSummary || {}),
         distance: `${distanceKm.toFixed(2)} km`,
         distanceValue: Number(distanceKm.toFixed(3)),
         bearing: `${normalizedBearing.toFixed(1)}°`,
@@ -1706,9 +1756,35 @@ function computeReceiverSummary(position) {
             }
             return fetchMunicipality(position);
         })
-        .then((municipality) => {
-            if (municipality) {
-                summary.municipality = municipality;
+        .then((geoDetails) => {
+            if (!geoDetails) {
+                return summary;
+            }
+            if (typeof geoDetails === 'string') {
+                summary.municipality = geoDetails;
+                return summary;
+            }
+            summary.municipality = geoDetails.municipality || geoDetails.name || summary.municipality;
+            summary.state = geoDetails.state_code || geoDetails.state || summary.state;
+            const popVal = parseNullableNumber(
+                geoDetails.population
+                ?? geoDetails.population_total
+                ?? geoDetails.demographics?.total
+            );
+            if (Number.isFinite(popVal)) {
+                summary.population = Number(popVal);
+                summary.populationYear = geoDetails.population_year || geoDetails.demographics?.year || summary.populationYear;
+            }
+            if (geoDetails.ibge_code || summary.population) {
+                const demographics = Number.isFinite(Number(summary.population))
+                    ? { total: Number(summary.population), year: summary.populationYear || null }
+                    : null;
+                summary.ibge = {
+                    ...(summary.ibge || {}),
+                    code: geoDetails.ibge_code || summary?.ibge?.code,
+                    state: summary.state || summary?.ibge?.state,
+                    demographics: demographics || summary?.ibge?.demographics,
+                };
             }
             return summary;
         })
@@ -1817,7 +1893,7 @@ function createRxMarker(position, options = {}) {
         hydrateSummary(presetSummary);
     }
 
-    computeReceiverSummary(position).then(hydrateSummary);
+    computeReceiverSummary(position, presetSummary || entry.summary).then(hydrateSummary);
 
     renderRxList();
     if (selectOnCreate) {
@@ -1852,7 +1928,7 @@ function setTxCoords(latLng, { pan = false } = {}) {
 
     state.rxEntries.forEach((entry, idx) => {
         if (entry.summary) {
-            computeReceiverSummary(entry.marker.getPosition()).then((summary) => {
+            computeReceiverSummary(entry.marker.getPosition(), entry.summary).then((summary) => {
                 entry.summary = summary;
                 if (idx === state.selectedRxIndex) {
                     updateLinkSummary(summary);
@@ -2200,18 +2276,22 @@ function updateProfileLegend(entry) {
     const formatDb = (value, suffix = 'dB') => (Number.isFinite(Number(value)) ? `${Number(value).toFixed(1)} ${suffix}` : '—');
     const formatDistance = (value) => (Number.isFinite(Number(value)) ? `${Number(value).toFixed(2)} km` : '—');
 
-    setText('profileTxMunicipality', tx.txLocationName || tx.municipality || '-');
-    setText('profileTxAltitude', formatMeters(tx.txElevation));
-    setText('profileTxTower', formatMeters(tx.towerHeight));
-    const direction = tx.antennaDirection != null ? formatAzimuth(tx.antennaDirection) : null;
-    setText('profileTxDirection', direction);
+   setText('profileTxMunicipality', tx.txLocationName || tx.municipality || '-');
+   setText('profileTxAltitude', formatMeters(tx.txElevation));
+   setText('profileTxTower', formatMeters(tx.towerHeight));
+   const direction = tx.antennaDirection != null ? formatAzimuth(tx.antennaDirection) : null;
+   setText('profileTxDirection', direction);
 
-    setText('profileRxMunicipality', summary.municipality || '-');
-    setText('profileRxElevation', summary.elevation || formatMeters(summary.elevationValue));
-    setText('profileRxField', summary.field || (Number.isFinite(summary.fieldValue) ? `${summary.fieldValue.toFixed(1)} dBµV/m` : '—'));
-    const rxHeight = tx.rxHeight != null ? `${Number(tx.rxHeight).toFixed(1)} m` : '—';
-    const bearingText = summary.bearing || (Number.isFinite(summary.bearingValue) ? `${summary.bearingValue.toFixed(1)}°` : '—');
-    setText('profileRxHeading', `${bearingText} / ${rxHeight}`);
+   setText('profileRxMunicipality', summary.municipality || '-');
+   setText('profileRxElevation', summary.elevation || formatMeters(summary.elevationValue));
+   setText('profileRxField', summary.field || (Number.isFinite(summary.fieldValue) ? `${summary.fieldValue.toFixed(1)} dBµV/m` : '—'));
+    const popVal = Number.isFinite(Number(summary.population))
+        ? Number(summary.population).toLocaleString('pt-BR')
+        : '—';
+    setText('profileRxPopulation', popVal);
+   const rxHeight = tx.rxHeight != null ? `${Number(tx.rxHeight).toFixed(1)} m` : '—';
+   const bearingText = summary.bearing || (Number.isFinite(summary.bearingValue) ? `${summary.bearingValue.toFixed(1)}°` : '—');
+   setText('profileRxHeading', `${bearingText} / ${rxHeight}`);
 
     const metaDistance = meta.distance_km ?? summary.distanceValue;
     setText('profileLinkDistance', formatDistance(metaDistance) || summary.distance || '—');
